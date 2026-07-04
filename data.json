@@ -1,0 +1,54 @@
+{
+  "widgets": [
+    {
+      "id": "w8",
+      "type": "clock",
+      "x": 1621,
+      "y": 64
+    },
+    {
+      "id": "w9",
+      "type": "todo",
+      "x": 1585,
+      "y": 480
+    },
+    {
+      "id": "w10",
+      "type": "timer",
+      "x": 1610,
+      "y": 229
+    }
+  ],
+  "todos": [
+    {
+      "title": "finish this project",
+      "description": "",
+      "done": false
+    },
+    {
+      "title": "fix the crud icons in the todo list",
+      "description": "",
+      "done": true
+    },
+    {
+      "title": "the beep sound is ass",
+      "description": "",
+      "done": true
+    },
+    {
+      "title": "when aot change state",
+      "description": "",
+      "done": true
+    },
+    {
+      "title": "add hub btn",
+      "description": "",
+      "done": true
+    },
+    {
+      "title": "fix timer stuff",
+      "description": "",
+      "done": true
+    }
+  ]
+}
