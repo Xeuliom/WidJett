@@ -1,0 +1,17 @@
+# Widjett — Python dependencies
+# Install with: pip install -r requirements.txt
+
+# UI framework
+PyQt5>=5.15.0
+
+# Windows API bindings (clipboard, process info, registry)
+pywin32>=306
+
+# Global hotkey listener
+pynput>=1.7.0
+
+# File system watcher (SmartNotes live reload)
+watchdog>=3.0.0
+
+# Process/CPU/memory info (used in radar/system widgets)
+psutil>=5.9.0
