@@ -17,6 +17,7 @@ import colorsys
 import queue
 import ctypes
 import time
+import winreg
 from collections import deque
 from datetime import datetime, timedelta
 from pathlib import Path
@@ -52,6 +53,13 @@ try:
 except ImportError:
     _HAS_PSUTIL = False
 
+try:
+    from widgets.smartnotes import SmartNotesWidget as _SmartNotesWidget
+    _HAS_SMARTNOTES = True
+except ImportError as _sn_err:
+    _HAS_SMARTNOTES = False
+    print(f"[WARN] SmartNotes not loaded: {_sn_err}")
+
 # ── High-DPI flags MUST be set BEFORE QApplication is created ────────────────
 from PyQt5.QtCore import Qt
 from PyQt5.QtWidgets import QApplication
@@ -63,7 +71,7 @@ from PyQt5.QtWidgets import (
     QLineEdit, QSpinBox, QListWidget, QListWidgetItem,
     QDialog, QTextEdit, QFormLayout, QDialogButtonBox,
     QSystemTrayIcon, QMenu, QAction, QFrame, QSizePolicy,
-    QCheckBox,
+    QCheckBox, QTabWidget, QColorDialog,
 )
 from PyQt5.QtCore import (
     QTimer, QPoint, pyqtSignal, QEvent, QSize,
@@ -119,21 +127,23 @@ def save_data(data: dict) -> None:
 #  Colour palette & QSS
 # ─────────────────────────────────────────────────────────────────────────────
 
-C_BG          = "rgba(22, 22, 32, 235)"
-C_HEADER_BG   = "rgba(35, 35, 52, 245)"
-C_BORDER      = "rgba(100, 100, 160, 90)"
-C_ACCENT      = "#7c6af7"
-C_ACCENT2     = "#56cfb2"
-C_TEXT        = "#e8e8f0"
-C_TEXT_DIM    = "#8888aa"
-C_BTN_HOVER   = "rgba(124, 106, 247, 160)"
-C_BTN_DANGER  = "rgba(220, 80, 80, 200)"
-C_BTN_SUCCESS = "rgba(80, 200, 140, 180)"
+# ── Premium color palette ─────────────────────────────────────────────────────
+C_BG          = "rgba(14, 14, 22, 240)"
+C_HEADER_BG   = "rgba(24, 24, 38, 248)"
+C_BORDER      = "rgba(90, 90, 150, 100)"
+C_ACCENT      = "#9d8df5"          # softer violet
+C_ACCENT2     = "#5dd6b5"          # teal-mint
+C_ACCENT3     = "#f472b6"          # pink accent (new)
+C_TEXT        = "#eeeef8"
+C_TEXT_DIM    = "#7a7a9a"
+C_BTN_HOVER   = "rgba(157, 141, 245, 170)"
+C_BTN_DANGER  = "rgba(235, 75, 75, 215)"
+C_BTN_SUCCESS = "rgba(93, 214, 181, 190)"
 
 GLOBAL_QSS = f"""
 QWidget {{
-    font-family: "Segoe UI", "Roboto", sans-serif;
-    font-size: 12px;
+    font-family: "Inter", "Segoe UI Variable Display", "Segoe UI", "Roboto", sans-serif;
+    font-size: 13px;
     color: {C_TEXT};
 }}
 
@@ -141,180 +151,200 @@ QWidget {{
 #Card {{
     background: {C_BG};
     border: 1px solid {C_BORDER};
-    border-radius: 12px;
+    border-radius: 16px;
 }}
 
 /* ── title bar ──────────────────────────────── */
 #TitleBar {{
-    background: {C_HEADER_BG};
-    border-top-left-radius: 12px;
-    border-top-right-radius: 12px;
+    background: qlineargradient(
+        x1:0, y1:0, x2:1, y2:0,
+        stop:0 rgba(30,28,52,245),
+        stop:1 rgba(20,20,36,245)
+    );
+    border-top-left-radius: 16px;
+    border-top-right-radius: 16px;
     border-bottom: 1px solid {C_BORDER};
 }}
 #TitleLabel {{
-    font-size: 11px;
+    font-size: 10px;
     font-weight: 700;
-    letter-spacing: 1.5px;
-    color: {C_TEXT};
-    padding-left: 2px;
+    letter-spacing: 2px;
+    color: {C_TEXT_DIM};
+    padding-left: 4px;
 }}
 
 /* ── generic flat button ────────────────────── */
 QPushButton {{
-    background: rgba(255,255,255,12);
+    background: rgba(255,255,255,10);
     color: {C_TEXT};
-    border: 1px solid rgba(255,255,255,20);
-    border-radius: 7px;
-    padding: 4px 12px;
+    border: 1px solid rgba(255,255,255,18);
+    border-radius: 9px;
+    padding: 5px 14px;
     font-size: 12px;
+    font-weight: 500;
 }}
 QPushButton:hover   {{ background: {C_BTN_HOVER};  border-color: {C_ACCENT}; }}
-QPushButton:pressed {{ background: rgba(124,106,247,230); }}
-QPushButton:disabled {{ color: {C_TEXT_DIM}; background: rgba(255,255,255,5); }}
+QPushButton:pressed {{ background: rgba(157,141,245,230); }}
+QPushButton:disabled {{ color: {C_TEXT_DIM}; background: rgba(255,255,255,4); border-color: rgba(255,255,255,8); }}
 
-/* ── icon buttons (close / pin) ─────────────── */
+/* ── icon buttons (close / pin / hub) ───────── */
 #CloseBtn, #PinBtn {{
     background: transparent;
     border: none;
     font-size: 13px;
     color: {C_TEXT_DIM};
-    border-radius: 6px;
-    min-width: 24px; max-width: 24px;
-    min-height: 24px; max-height: 24px;
+    border-radius: 7px;
+    min-width: 26px; max-width: 26px;
+    min-height: 26px; max-height: 26px;
     padding: 0;
 }}
-#CloseBtn:hover {{ background: {C_BTN_DANGER};  color: white; }}
-#PinBtn:hover   {{ background: rgba(86,207,178,120); color: white; }}
+#CloseBtn:hover {{ background: {C_BTN_DANGER}; color: white; }}
+#PinBtn:hover   {{ background: rgba(93,214,181,130); color: white; }}
 #PinBtn[pinned="true"] {{ color: {C_ACCENT2}; }}
 
 /* ── clock ──────────────────────────────────── */
 #ClockDisplay {{
-    font-size: 42px;
-    font-weight: 700;
-    letter-spacing: 2px;
+    font-size: 48px;
+    font-weight: 800;
+    letter-spacing: 3px;
     color: {C_ACCENT};
     qproperty-alignment: AlignCenter;
 }}
 #DateDisplay {{
     font-size: 13px;
-    letter-spacing: 0.8px;
+    font-weight: 500;
+    letter-spacing: 1px;
     color: {C_TEXT_DIM};
     qproperty-alignment: AlignCenter;
-    padding-bottom: 4px;
+    padding-bottom: 6px;
 }}
 
 /* ── timer ──────────────────────────────────── */
 #TimerDisplay {{
-    font-size: 52px;
-    font-weight: 700;
-    letter-spacing: 3px;
+    font-size: 58px;
+    font-weight: 800;
+    letter-spacing: 4px;
     color: {C_ACCENT2};
     qproperty-alignment: AlignCenter;
 }}
 #TimerDisplayAlert {{
-    font-size: 52px;
-    font-weight: 700;
-    letter-spacing: 3px;
-    color: #ff3030;
+    font-size: 58px;
+    font-weight: 800;
+    letter-spacing: 4px;
+    color: #ff4555;
     qproperty-alignment: AlignCenter;
 }}
 
 /* ── inputs ─────────────────────────────────── */
 QSpinBox, QLineEdit {{
-    background: rgba(255,255,255,10);
-    border: 1px solid rgba(255,255,255,22);
-    border-radius: 7px;
-    padding: 4px 8px;
+    background: rgba(255,255,255,8);
+    border: 1px solid rgba(255,255,255,20);
+    border-radius: 8px;
+    padding: 5px 10px;
     color: {C_TEXT};
     selection-background-color: {C_ACCENT};
 }}
 QSpinBox:focus, QLineEdit:focus {{
     border-color: {C_ACCENT};
-    background: rgba(124,106,247,18);
+    background: rgba(157,141,245,15);
 }}
 QSpinBox::up-button, QSpinBox::down-button {{
     width: 18px; border: none;
-    background: rgba(255,255,255,10);
+    background: rgba(255,255,255,8);
+    border-radius: 4px;
 }}
 QSpinBox::up-button:hover, QSpinBox::down-button:hover {{
     background: {C_BTN_HOVER};
 }}
 
-/* ── todo list ──────────────────────────────── */
+/* ── list widgets ───────────────────────────── */
 QListWidget {{
     background: rgba(255,255,255,5);
-    border: 1px solid rgba(255,255,255,14);
-    border-radius: 8px;
+    border: 1px solid rgba(255,255,255,12);
+    border-radius: 10px;
     outline: none;
     padding: 4px;
 }}
-QListWidget::item {{ border-radius: 6px; padding: 3px 2px; }}
-QListWidget::item:selected {{ background: rgba(124,106,247,70); }}
-QListWidget::item:hover     {{ background: rgba(255,255,255,8); }}
+QListWidget::item {{ border-radius: 7px; padding: 4px 3px; }}
+QListWidget::item:selected {{ background: rgba(157,141,245,75); }}
+QListWidget::item:hover     {{ background: rgba(255,255,255,9); }}
 
 /* ── scrollbar ──────────────────────────────── */
 QScrollBar:vertical {{
     background: transparent; width: 5px; margin: 0;
 }}
 QScrollBar::handle:vertical {{
-    background: rgba(255,255,255,40);
-    border-radius: 2px; min-height: 20px;
+    background: rgba(255,255,255,45);
+    border-radius: 3px; min-height: 20px;
 }}
 QScrollBar::add-line:vertical, QScrollBar::sub-line:vertical {{ height:0; }}
 
-/* ── edit dialog ────────────────────────────── */
+/* ── dialogs ────────────────────────────────── */
 #DialogCard {{
-    background: rgba(28,28,42,248);
+    background: rgba(18,18,30,252);
     border: 1px solid {C_BORDER};
-    border-radius: 12px;
+    border-radius: 16px;
 }}
 QTextEdit {{
-    background: rgba(255,255,255,10);
-    border: 1px solid rgba(255,255,255,20);
-    border-radius: 7px;
-    padding: 6px;
+    background: rgba(255,255,255,8);
+    border: 1px solid rgba(255,255,255,18);
+    border-radius: 9px;
+    padding: 7px;
     color: {C_TEXT};
 }}
-QDialogButtonBox QPushButton {{ min-width: 80px; }}
+QDialogButtonBox QPushButton {{ min-width: 84px; }}
 
 /* ── checkbox ───────────────────────────────── */
-QCheckBox {{ spacing: 6px; color: {C_TEXT}; }}
+QCheckBox {{ spacing: 7px; color: {C_TEXT}; }}
 QCheckBox::indicator {{
-    width: 14px; height: 14px; border-radius: 4px;
-    border: 1px solid rgba(255,255,255,40);
-    background: rgba(255,255,255,8);
+    width: 15px; height: 15px; border-radius: 5px;
+    border: 1px solid rgba(255,255,255,38);
+    background: rgba(255,255,255,7);
 }}
 QCheckBox::indicator:checked {{
     background: {C_ACCENT}; border-color: {C_ACCENT};
 }}
 
+/* ── progress bar ───────────────────────────── */
+QProgressBar {{
+    background: rgba(255,255,255,8);
+    border: none; border-radius: 4px;
+}}
+QProgressBar::chunk {{
+    background: qlineargradient(
+        x1:0,y1:0,x2:1,y2:0,
+        stop:0 {C_ACCENT}, stop:1 {C_ACCENT2});
+    border-radius: 4px;
+}}
+
 /* ── launcher ───────────────────────────────── */
 #Launcher {{
     background: qlineargradient(
-        x1:0,y1:0,x2:1,y2:1,
-        stop:0 rgba(22,22,38,252),
-        stop:1 rgba(32,28,55,252)
+        x1:0, y1:0, x2:1, y2:1,
+        stop:0 rgba(16,14,30,254),
+        stop:0.5 rgba(20,18,38,254),
+        stop:1 rgba(24,20,44,254)
     );
-    border: 1px solid {C_BORDER};
-    border-radius: 14px;
+    border: 1px solid rgba(110,100,170,120);
+    border-radius: 18px;
 }}
-#LauncherTitle  {{ font-size:15px; font-weight:700; letter-spacing:2px; color:{C_TEXT}; }}
-#LauncherSub    {{ font-size:10px; color:{C_TEXT_DIM}; letter-spacing:1px; }}
+#LauncherTitle  {{ font-size:16px; font-weight:800; letter-spacing:2.5px; color:{C_TEXT}; }}
+#LauncherSub    {{ font-size:10px; color:{C_TEXT_DIM}; letter-spacing:1.5px; }}
 #LaunchBtn {{
-    background: rgba(255,255,255,7);
-    border: 1px solid rgba(255,255,255,16);
-    border-radius: 9px;
-    padding: 10px 18px;
-    font-size: 13px; font-weight:500;
+    background: rgba(255,255,255,6);
+    border: 1px solid rgba(255,255,255,14);
+    border-radius: 10px;
+    padding: 11px 18px;
+    font-size: 13px; font-weight:600;
     color: {C_TEXT};
     text-align: left;
 }}
-#LaunchBtn:hover   {{ background: rgba(124,106,247,140); border-color:{C_ACCENT}; }}
-#LaunchBtn:pressed {{ background: rgba(124,106,247,210); }}
+#LaunchBtn:hover   {{ background: rgba(157,141,245,150); border-color:{C_ACCENT}; }}
+#LaunchBtn:pressed {{ background: rgba(157,141,245,220); }}
 #LaunchBtn:disabled {{
     color: {C_TEXT_DIM};
-    background: rgba(255,255,255,4);
-    border-color: rgba(255,255,255,8);
+    background: rgba(255,255,255,3);
+    border-color: rgba(255,255,255,7);
 }}
 """
 
@@ -379,7 +409,6 @@ class FloatingWidget(QWidget):
         self._title_bar = self._make_title_bar()
         card_layout.addWidget(self._title_bar)
 
-        # content area (sub-classes populate this)
         self._content_widget = QWidget()
         self._content_layout = QVBoxLayout(self._content_widget)
         self._content_layout.setContentsMargins(14, 12, 14, 14)
@@ -387,6 +416,40 @@ class FloatingWidget(QWidget):
         card_layout.addWidget(self._content_widget)
 
         outer.addWidget(self._card)
+        self._apply_saved_colors()
+
+    def _apply_saved_colors(self) -> None:
+        """Applies saved colors from data_ref to this widget's card and title bar."""
+        colors = self._data_ref.get("hub_colors")
+        if colors and "header" in colors and "body" in colors:
+            hr = colors["header"]
+            br = colors["body"]
+            
+            # Apply to the card body
+            self._card.setStyleSheet(
+                f"#Card {{"
+                f"  background: rgba({br[0]},{br[1]},{br[2]},{br[3]});"
+                f"  border: 1px solid rgba(110,100,170,120);"
+                f"  border-radius: 16px;"
+                f"}}"
+            )
+            # Apply to the title bar
+            self._title_bar.setStyleSheet(
+                f"#TitleBar {{"
+                f"  background: qlineargradient("
+                f"    x1:0, y1:0, x2:1, y2:0,"
+                f"    stop:0 rgba({hr[0]},{hr[1]},{hr[2]},{hr[3]}),"
+                f"    stop:1 rgba({hr[0]},{hr[1]},{hr[2]}, max(0, {hr[3]} - 30))"
+                f"  );"
+                f"  border-top-left-radius: 16px;"
+                f"  border-top-right-radius: 16px;"
+                f"  border-bottom: 1px solid rgba(90, 90, 150, 100);"
+                f"}}"
+            )
+        else:
+            # Revert to default by clearing inline stylesheet (relies on GLOBAL_QSS)
+            self._card.setStyleSheet("")
+            self._title_bar.setStyleSheet("")
 
     def _make_title_bar(self) -> QWidget:
         bar = QWidget()
@@ -532,7 +595,7 @@ class ClockWidget(FloatingWidget):
 
     def __init__(self, widget_id: str, data_ref: dict, x: int = 200, y: int = 200):
         super().__init__("🕐  Clock", widget_id, data_ref, x, y)
-        self.setFixedWidth(256)
+        self.setFixedWidth(300)
         self._build_clock()
 
     def _build_clock(self) -> None:
@@ -564,202 +627,82 @@ class ClockWidget(FloatingWidget):
 # ─────────────────────────────────────────────────────────────────────────────
 
 class TimerWidget(FloatingWidget):
+    """
+    Two-tab widget: Timer tab and Alarm tab.
+    Both run independently — switching tabs does NOT pause either.
+    """
     WIDGET_TYPE = "timer"
 
-    def __init__(self, widget_id: str, data_ref: dict, x: int = 200, y: int = 200):
-        super().__init__("⏱  Timer", widget_id, data_ref, x, y)
-        self.setFixedWidth(276)
-        self._remaining      = 0
-        self._running        = False
-        self._flash_count    = 0
-        self._alarm_stop_evt = threading.Event()   # signals alarm thread to stop
-        self._build_timer_ui()
+    def _apply_saved_colors(self) -> None:
+        super()._apply_saved_colors()
+        if not hasattr(self, '_tab_widget'):
+            return
+        colors = self._data_ref.get("hub_colors")
+        if colors and "header" in colors and "body" in colors:
+            hr = colors["header"]
+            br = colors["body"]
+            
+            self._tab_widget.setStyleSheet(
+                f"""
+                QTabWidget::pane {{
+                    border: 1px solid rgba(255,255,255,40);
+                    border-radius: 10px;
+                    background: rgba({br[0]},{br[1]},{br[2]}, max(0, {br[3]} - 40));
+                }}
+                QTabBar::tab {{
+                    background: rgba(255,255,255,6);
+                    color: {C_TEXT_DIM};
+                    border: 1px solid rgba(255,255,255,30);
+                    border-bottom: none;
+                    border-top-left-radius: 8px;
+                    border-top-right-radius: 8px;
+                    padding: 6px 18px;
+                    font-size: 12px;
+                    font-weight: 600;
+                    margin-right: 3px;
+                }}
+                QTabBar::tab:selected {{
+                    background: rgba({hr[0]},{hr[1]},{hr[2]}, max(0, {hr[3]} - 30));
+                    color: {C_TEXT};
+                    border: 1px solid rgba({hr[0]},{hr[1]},{hr[2]}, 200);
+                }}
+                QTabBar::tab:hover:!selected {{
+                    background: rgba(255,255,255,15);
+                    color: {C_TEXT};
+                }}
+                """
+            )
+        else:
+            self._tab_widget.setStyleSheet(getattr(self, '_default_tab_qss', ''))
 
-    def _build_timer_ui(self) -> None:
-        self._content_layout.setSpacing(10)
-        self._content_layout.setContentsMargins(14, 12, 14, 14)
 
-        # ── big display ──
-        self._display = QLabel("00:00")
-        self._display.setObjectName("TimerDisplay")
-        self._display.setAlignment(Qt.AlignCenter)
-        self.add_to_content(self._display)
-
-        # ── input row ──
-        row = QHBoxLayout()
-        row.setSpacing(6)
-
-        lbl_m = QLabel("Min")
-        lbl_m.setStyleSheet(f"color:{C_TEXT_DIM}; font-size:11px;")
-        self._min_spin = QSpinBox()
-        self._min_spin.setRange(0, 99)
-        self._min_spin.setValue(0)
-        self._min_spin.setFixedWidth(58)
-        # Allow mouse wheel AND keyboard
-        self._min_spin.setFocusPolicy(Qt.StrongFocus)
-
-        lbl_s = QLabel("Sec")
-        lbl_s.setStyleSheet(f"color:{C_TEXT_DIM}; font-size:11px;")
-        self._sec_spin = QSpinBox()
-        self._sec_spin.setRange(0, 59)
-        self._sec_spin.setValue(0)
-        self._sec_spin.setFixedWidth(58)
-        self._sec_spin.setFocusPolicy(Qt.StrongFocus)
-
-        row.addStretch()
-        row.addWidget(lbl_m)
-        row.addWidget(self._min_spin)
-        row.addWidget(lbl_s)
-        row.addWidget(self._sec_spin)
-        row.addStretch()
-        self.add_layout_to_content(row)
-
-        # ── control buttons ──
-        btn_row = QHBoxLayout()
-        btn_row.setSpacing(6)
-        self._start_btn = QPushButton("▶  Start")
-        self._pause_btn = QPushButton("⏸  Pause")
-        self._reset_btn = QPushButton("↺  Reset")
-        self._pause_btn.setEnabled(False)
-        self._start_btn.clicked.connect(self._start)
-        self._pause_btn.clicked.connect(self._pause)
-        self._reset_btn.clicked.connect(self._reset)
-        btn_row.addWidget(self._start_btn)
-        btn_row.addWidget(self._pause_btn)
-        btn_row.addWidget(self._reset_btn)
-        self.add_layout_to_content(btn_row)
-
-        # ── stop-alarm button (hidden until alarm fires) ──
-        self._stop_alarm_btn = QPushButton("🔕  Stop Alarm")
-        self._stop_alarm_btn.setStyleSheet(
-            f"QPushButton{{"
-            f"  background: rgba(220,60,60,200);"
-            f"  border: 1px solid rgba(255,100,100,180);"
-            f"  border-radius: 7px;"
-            f"  font-weight: 700;"
-            f"  padding: 6px;"
-            f"}}"
-            f"QPushButton:hover{{"
-            f"  background: rgba(255,80,80,230);"
-            f"}}"
-        )
-        self._stop_alarm_btn.hide()
-        self._stop_alarm_btn.clicked.connect(self._stop_alarm)
-        self.add_to_content(self._stop_alarm_btn)
-
-        # ── internal timers ──
-        self._tick_timer  = QTimer(self)
-        self._tick_timer.setInterval(1000)
-        self._tick_timer.timeout.connect(self._tick)
-
-        self._flash_timer = QTimer(self)
-        self._flash_timer.setInterval(400)
-        self._flash_timer.timeout.connect(self._flash)
-
-    # ── controls ──────────────────────────────────────────────────────────────
-
-    def _start(self) -> None:
-        if self._remaining == 0:
-            total = self._min_spin.value() * 60 + self._sec_spin.value()
-            if total == 0:
-                return
-            self._remaining = total
-        self._running = True
-        self._start_btn.setEnabled(False)
-        self._pause_btn.setEnabled(True)
-        self._tick_timer.start()
-        self._update_display()
-
-    def _pause(self) -> None:
-        self._running = False
-        self._tick_timer.stop()
-        self._start_btn.setEnabled(True)
-        self._pause_btn.setEnabled(False)
-
-    def _reset(self) -> None:
-        self._stop_alarm()   # silence any running alarm first
-        self._tick_timer.stop()
-        self._flash_timer.stop()
-        self._running     = False
-        self._remaining   = 0
-        self._flash_count = 0
-        self._set_display_normal()
-        self._display.setText("00:00")
-        self._start_btn.setEnabled(True)
-        self._pause_btn.setEnabled(False)
-
-    def _tick(self) -> None:
-        if self._remaining > 0:
-            self._remaining -= 1
-            self._update_display()
-        if self._remaining == 0:
-            self._tick_timer.stop()
-            self._running = False
-            self._start_btn.setEnabled(True)
-            self._pause_btn.setEnabled(False)
-            self._alert()
-
-    def _update_display(self) -> None:
-        m, s = divmod(self._remaining, 60)
-        self._display.setText(f"{m:02d}:{s:02d}")
-
-    def _on_close(self) -> None:
-        self._stop_alarm()
-        super()._on_close()
-
-    def _alert(self) -> None:
-        """Show Stop-Alarm button and play sound in a background thread.
-        Drop an 'alarm.wav' next to main.py to use a custom ringtone.
-        """
-        self._alarm_stop_evt.clear()
-        self._stop_alarm_btn.show()
-        self._flash_count = 0
-        self._flash_timer.start()
-        threading.Thread(
-            target=self._play_alarm,
-            args=(self._alarm_stop_evt,),
-            daemon=True,
-        ).start()
+    # ── shared alarm-sound helper ──────────────────────────────────────────────
 
     @staticmethod
-    def _play_alarm(stop_evt: threading.Event) -> None:
-        """Blocking alarm loop — interrupted immediately when stop_evt is set."""
-        custom = None
+    def _play_alarm_sound(stop_evt: threading.Event) -> None:
+        """Blocking alarm loop — runs in a daemon thread."""
         if getattr(sys, 'frozen', False):
-            external_custom = Path(sys.executable).parent / "alarm.wav"
-            if external_custom.exists():
-                custom = external_custom
-            else:
-                custom = get_asset_path("alarm.wav")
+            external = Path(sys.executable).parent / "alarm.wav"
+            custom = external if external.exists() else get_asset_path("alarm.wav")
         else:
             custom = get_asset_path("alarm.wav")
         if custom.exists():
             try:
                 winsound.PlaySound(
                     str(custom),
-                    winsound.SND_FILENAME | winsound.SND_NODEFAULT | winsound.SND_ASYNC | winsound.SND_LOOP,
+                    winsound.SND_FILENAME | winsound.SND_NODEFAULT
+                    | winsound.SND_ASYNC | winsound.SND_LOOP,
                 )
             except Exception:
                 pass
-            
             stop_evt.wait()
-            
             try:
                 winsound.PlaySound(None, winsound.SND_ASYNC)
             except Exception:
                 pass
         else:
             while not stop_evt.is_set():
-                try:
-                    winsound.PlaySound(
-                        "SystemExclamation",
-                        winsound.SND_ALIAS | winsound.SND_NODEFAULT,
-                    )
-                except Exception:
-                    pass
-                if stop_evt.is_set():
-                    break
-                for freq, dur in [(880,180),(1100,180),(880,180),(1100,180),(880,350)]:
+                for freq, dur in [(880, 180), (1100, 180), (880, 350)]:
                     if stop_evt.is_set():
                         break
                     try:
@@ -767,38 +710,419 @@ class TimerWidget(FloatingWidget):
                     except Exception:
                         pass
 
-    def _stop_alarm(self) -> None:
-        """Silence the alarm and restore normal timer UI."""
-        self._alarm_stop_evt.set()
-        # Silences any winsound still playing on this thread
+    # ── init ──────────────────────────────────────────────────────────────────
+
+    def __init__(self, widget_id: str, data_ref: dict, x: int = 200, y: int = 200):
+        # Initialize state BEFORE super().__init__(), because the base class
+        # calls self._build_ui() which references these attributes.
+        self._t_remaining   = 0
+        self._t_running     = False
+        self._t_flash_count = 0
+        self._t_alarm_evt   = threading.Event()
+        self._a_active      = False
+        self._a_alarm_evt   = threading.Event()
+        self._a_fired       = False
+
+        super().__init__("⏱  Timer & Alarm", widget_id, data_ref, x, y)
+        self.setFixedWidth(360)
+
+    # ── main UI (tabs) ────────────────────────────────────────────────────────
+
+    def _build_ui(self) -> None:
+        super()._build_ui()   # ← sets up _content_layout, title bar, etc.
+        self._content_layout.setContentsMargins(8, 8, 8, 10)
+        self._content_layout.setSpacing(0)
+
+        self._tab_widget = QTabWidget()
+        self._default_tab_qss = f"""
+            QTabWidget::pane {{
+                border: 1px solid rgba(90,90,150,80);
+                border-radius: 10px;
+                background: rgba(20,20,36,180);
+            }}
+            QTabBar::tab {{
+                background: rgba(255,255,255,6);
+                color: {C_TEXT_DIM};
+                border: 1px solid rgba(90,90,150,60);
+                border-bottom: none;
+                border-top-left-radius: 8px;
+                border-top-right-radius: 8px;
+                padding: 6px 18px;
+                font-size: 12px;
+                font-weight: 600;
+                margin-right: 3px;
+            }}
+            QTabBar::tab:selected {{
+                background: rgba(157,141,245,120);
+                color: {C_TEXT};
+                border-color: {C_ACCENT};
+            }}
+            QTabBar::tab:hover:!selected {{
+                background: rgba(157,141,245,50);
+                color: {C_TEXT};
+            }}
+            """
+        self._tab_widget.setStyleSheet(self._default_tab_qss)
+        self._apply_saved_colors() # apply theme colors if any
+
+        # ── Timer tab ─────────────────────────────────────────────────────────
+        timer_page = QWidget()
+        timer_page.setStyleSheet("background: transparent;")
+        t_lay = QVBoxLayout(timer_page)
+        t_lay.setContentsMargins(12, 14, 12, 14)
+        t_lay.setSpacing(10)
+
+        self._t_display = QLabel("00:00")
+        self._t_display.setObjectName("TimerDisplay")
+        self._t_display.setAlignment(Qt.AlignCenter)
+        t_lay.addWidget(self._t_display)
+
+        spin_row = QHBoxLayout()
+        spin_row.setSpacing(6)
+        lbl_m = QLabel("Min")
+        lbl_m.setStyleSheet(f"color:{C_TEXT_DIM}; font-size:11px;")
+        self._t_min_spin = QSpinBox()
+        self._t_min_spin.setRange(0, 99)
+        self._t_min_spin.setFixedWidth(58)
+        self._t_min_spin.setFocusPolicy(Qt.StrongFocus)
+        lbl_s = QLabel("Sec")
+        lbl_s.setStyleSheet(f"color:{C_TEXT_DIM}; font-size:11px;")
+        self._t_sec_spin = QSpinBox()
+        self._t_sec_spin.setRange(0, 59)
+        self._t_sec_spin.setFixedWidth(58)
+        self._t_sec_spin.setFocusPolicy(Qt.StrongFocus)
+        spin_row.addStretch()
+        spin_row.addWidget(lbl_m)
+        spin_row.addWidget(self._t_min_spin)
+        spin_row.addWidget(lbl_s)
+        spin_row.addWidget(self._t_sec_spin)
+        spin_row.addStretch()
+        t_lay.addLayout(spin_row)
+
+        btn_row = QHBoxLayout()
+        btn_row.setSpacing(6)
+        self._t_start_btn = QPushButton("▶  Start")
+        self._t_pause_btn = QPushButton("⏸  Pause")
+        self._t_reset_btn = QPushButton("↺  Reset")
+        self._t_pause_btn.setEnabled(False)
+        self._t_start_btn.clicked.connect(self._t_start)
+        self._t_pause_btn.clicked.connect(self._t_pause)
+        self._t_reset_btn.clicked.connect(self._t_reset)
+        btn_row.addWidget(self._t_start_btn)
+        btn_row.addWidget(self._t_pause_btn)
+        btn_row.addWidget(self._t_reset_btn)
+        t_lay.addLayout(btn_row)
+
+        self._t_stop_alarm_btn = QPushButton("🔕  Stop Alarm")
+        self._t_stop_alarm_btn.setStyleSheet(
+            "QPushButton{background:rgba(220,60,60,200);border:1px solid rgba(255,100,100,180);"
+            "border-radius:7px;font-weight:700;padding:6px;}"
+            "QPushButton:hover{background:rgba(255,80,80,230);}"
+        )
+        self._t_stop_alarm_btn.hide()
+        self._t_stop_alarm_btn.clicked.connect(self._t_stop_alarm)
+        t_lay.addWidget(self._t_stop_alarm_btn)
+
+        self._tab_widget.addTab(timer_page, "⏱  Timer")
+
+        # ── Alarm tab ─────────────────────────────────────────────────────────
+        alarm_page = QWidget()
+        alarm_page.setStyleSheet("background: transparent;")
+        a_lay = QVBoxLayout(alarm_page)
+        a_lay.setContentsMargins(12, 18, 12, 14)
+        a_lay.setSpacing(12)
+
+        # Clock icon + status
+        self._a_status_lbl = QLabel("⏰  Set an Alarm")
+        self._a_status_lbl.setAlignment(Qt.AlignCenter)
+        self._a_status_lbl.setStyleSheet(
+            f"font-size:13px; font-weight:700; color:{C_TEXT_DIM}; letter-spacing:1px;"
+        )
+        a_lay.addWidget(self._a_status_lbl)
+
+        # Big countdown display (hidden until alarm is active)
+        self._a_countdown_lbl = QLabel("")
+        self._a_countdown_lbl.setObjectName("TimerDisplay")
+        self._a_countdown_lbl.setAlignment(Qt.AlignCenter)
+        self._a_countdown_lbl.hide()
+        a_lay.addWidget(self._a_countdown_lbl)
+
+        # Time input row (HH : MM)
+        time_row = QHBoxLayout()
+        time_row.setSpacing(6)
+        time_row.addStretch()
+
+        lbl_h2 = QLabel("Hour")
+        lbl_h2.setStyleSheet(f"color:{C_TEXT_DIM}; font-size:11px;")
+        self._a_hour_spin = QSpinBox()
+        self._a_hour_spin.setRange(0, 23)
+        self._a_hour_spin.setFixedWidth(58)
+        self._a_hour_spin.setFocusPolicy(Qt.StrongFocus)
+        now = datetime.now()
+        self._a_hour_spin.setValue(now.hour)
+
+        colon = QLabel(":")
+        colon.setStyleSheet(f"color:{C_TEXT}; font-size:16px; font-weight:700;")
+
+        lbl_m2 = QLabel("Min")
+        lbl_m2.setStyleSheet(f"color:{C_TEXT_DIM}; font-size:11px;")
+        self._a_min_spin = QSpinBox()
+        self._a_min_spin.setRange(0, 59)
+        self._a_min_spin.setFixedWidth(58)
+        self._a_min_spin.setFocusPolicy(Qt.StrongFocus)
+        self._a_min_spin.setValue((now.minute + 1) % 60)
+
+        time_row.addWidget(lbl_h2)
+        time_row.addWidget(self._a_hour_spin)
+        time_row.addWidget(colon)
+        time_row.addWidget(lbl_m2)
+        time_row.addWidget(self._a_min_spin)
+        time_row.addStretch()
+        a_lay.addLayout(time_row)
+
+        # Label row (optional label)
+        self._a_label_edit = QLineEdit()
+        self._a_label_edit.setPlaceholderText("Alarm label (optional)…")
+        self._a_label_edit.setFocusPolicy(Qt.StrongFocus)
+        a_lay.addWidget(self._a_label_edit)
+
+        # Set / Cancel buttons
+        a_btn_row = QHBoxLayout()
+        a_btn_row.setSpacing(6)
+        self._a_set_btn    = QPushButton("🔔  Set Alarm")
+        self._a_cancel_btn = QPushButton("✕  Cancel")
+        self._a_cancel_btn.setEnabled(False)
+        self._a_set_btn.clicked.connect(self._a_set)
+        self._a_cancel_btn.clicked.connect(self._a_cancel)
+        a_btn_row.addWidget(self._a_set_btn)
+        a_btn_row.addWidget(self._a_cancel_btn)
+        a_lay.addLayout(a_btn_row)
+
+        # Stop alarm button (hidden until alarm fires)
+        self._a_stop_btn = QPushButton("🔕  Dismiss Alarm")
+        self._a_stop_btn.setStyleSheet(
+            "QPushButton{background:rgba(220,60,60,200);border:1px solid rgba(255,100,100,180);"
+            "border-radius:7px;font-weight:700;padding:6px;}"
+            "QPushButton:hover{background:rgba(255,80,80,230);}"
+        )
+        self._a_stop_btn.hide()
+        self._a_stop_btn.clicked.connect(self._a_stop)
+        a_lay.addWidget(self._a_stop_btn)
+
+        a_lay.addStretch()
+        self._tab_widget.addTab(alarm_page, "⏰  Alarm")
+        self._content_layout.addWidget(self._tab_widget)
+
+        # ── internal QTimers ──────────────────────────────────────────────────
+        self._t_tick_timer = QTimer(self)
+        self._t_tick_timer.setInterval(1000)
+        self._t_tick_timer.timeout.connect(self._t_tick)
+
+        self._t_flash_timer = QTimer(self)
+        self._t_flash_timer.setInterval(400)
+        self._t_flash_timer.timeout.connect(self._t_flash)
+
+        # Alarm polling — checks wall clock every second
+        self._a_poll_timer = QTimer(self)
+        self._a_poll_timer.setInterval(1000)
+        self._a_poll_timer.timeout.connect(self._a_poll)
+        self._a_poll_timer.start()
+
+    # ══════════════════════════════════════════════════════════════════════════
+    #  TIMER TAB LOGIC
+    # ══════════════════════════════════════════════════════════════════════════
+
+    def _t_start(self) -> None:
+        if self._t_remaining == 0:
+            total = self._t_min_spin.value() * 60 + self._t_sec_spin.value()
+            if total == 0:
+                return
+            self._t_remaining = total
+        self._t_running = True
+        self._t_start_btn.setEnabled(False)
+        self._t_pause_btn.setEnabled(True)
+        self._t_tick_timer.start()
+        self._t_update_display()
+
+    def _t_pause(self) -> None:
+        self._t_running = False
+        self._t_tick_timer.stop()
+        self._t_start_btn.setEnabled(True)
+        self._t_pause_btn.setEnabled(False)
+
+    def _t_reset(self) -> None:
+        self._t_stop_alarm()
+        self._t_tick_timer.stop()
+        self._t_flash_timer.stop()
+        self._t_running     = False
+        self._t_remaining   = 0
+        self._t_flash_count = 0
+        self._t_set_display_normal()
+        self._t_display.setText("00:00")
+        self._t_start_btn.setEnabled(True)
+        self._t_pause_btn.setEnabled(False)
+
+    def _t_tick(self) -> None:
+        if self._t_remaining > 0:
+            self._t_remaining -= 1
+            self._t_update_display()
+        if self._t_remaining == 0:
+            self._t_tick_timer.stop()
+            self._t_running = False
+            self._t_start_btn.setEnabled(True)
+            self._t_pause_btn.setEnabled(False)
+            self._t_alert()
+
+    def _t_update_display(self) -> None:
+        m, s = divmod(self._t_remaining, 60)
+        self._t_display.setText(f"{m:02d}:{s:02d}")
+
+    def _t_alert(self) -> None:
+        self._t_alarm_evt.clear()
+        self._t_stop_alarm_btn.show()
+        self._t_flash_count = 0
+        self._t_flash_timer.start()
+        threading.Thread(
+            target=self._play_alarm_sound,
+            args=(self._t_alarm_evt,),
+            daemon=True,
+        ).start()
+
+    def _t_stop_alarm(self) -> None:
+        self._t_alarm_evt.set()
         try:
             winsound.PlaySound(None, winsound.SND_ASYNC)
         except Exception:
             pass
-        self._flash_timer.stop()
-        self._set_display_normal()
-        self._display.setText("00:00")
-        self._stop_alarm_btn.hide()
-        self._start_btn.setEnabled(True)
-        self._pause_btn.setEnabled(False)
+        self._t_flash_timer.stop()
+        self._t_set_display_normal()
+        self._t_display.setText("00:00")
+        self._t_stop_alarm_btn.hide()
+        self._t_start_btn.setEnabled(True)
+        self._t_pause_btn.setEnabled(False)
 
-    def _flash(self) -> None:
-        if self._flash_count >= 6:
-            self._flash_timer.stop()
-            self._set_display_normal()
+    def _t_flash(self) -> None:
+        if self._t_flash_count >= 6:
+            self._t_flash_timer.stop()
+            self._t_set_display_normal()
             return
-        if self._flash_count % 2 == 0:
-            self._display.setObjectName("TimerDisplayAlert")
+        if self._t_flash_count % 2 == 0:
+            self._t_display.setObjectName("TimerDisplayAlert")
         else:
-            self._set_display_normal()
-        self._display.style().unpolish(self._display)
-        self._display.style().polish(self._display)
-        self._flash_count += 1
+            self._t_set_display_normal()
+        self._t_display.style().unpolish(self._t_display)
+        self._t_display.style().polish(self._t_display)
+        self._t_flash_count += 1
 
-    def _set_display_normal(self) -> None:
-        self._display.setObjectName("TimerDisplay")
-        self._display.style().unpolish(self._display)
-        self._display.style().polish(self._display)
+    def _t_set_display_normal(self) -> None:
+        self._t_display.setObjectName("TimerDisplay")
+        self._t_display.style().unpolish(self._t_display)
+        self._t_display.style().polish(self._t_display)
+
+    # ══════════════════════════════════════════════════════════════════════════
+    #  ALARM TAB LOGIC
+    # ══════════════════════════════════════════════════════════════════════════
+
+    def _a_set(self) -> None:
+        """Set the alarm for the next occurrence of the chosen HH:MM."""
+        self._a_fired = False
+        self._a_alarm_evt.clear()
+        self._a_active = True
+        self._a_set_btn.setEnabled(False)
+        self._a_cancel_btn.setEnabled(True)
+        self._a_hour_spin.setEnabled(False)
+        self._a_min_spin.setEnabled(False)
+        self._a_label_edit.setEnabled(False)
+        h = self._a_hour_spin.value()
+        m = self._a_min_spin.value()
+        label = self._a_label_edit.text().strip() or f"Alarm at {h:02d}:{m:02d}"
+        self._a_status_lbl.setText(f"⏰  {label}")
+        self._a_status_lbl.setStyleSheet(
+            f"font-size:13px; font-weight:700; color:{C_ACCENT2}; letter-spacing:1px;"
+        )
+        self._a_countdown_lbl.show()
+
+    def _a_cancel(self) -> None:
+        self._a_stop()
+
+    def _a_stop(self) -> None:
+        """Dismiss / cancel the alarm."""
+        self._a_active = False
+        self._a_fired  = False
+        self._a_alarm_evt.set()
+        try:
+            winsound.PlaySound(None, winsound.SND_ASYNC)
+        except Exception:
+            pass
+        self._a_set_btn.setEnabled(True)
+        self._a_cancel_btn.setEnabled(False)
+        self._a_hour_spin.setEnabled(True)
+        self._a_min_spin.setEnabled(True)
+        self._a_label_edit.setEnabled(True)
+        self._a_stop_btn.hide()
+        self._a_countdown_lbl.hide()
+        self._a_countdown_lbl.setObjectName("")
+        self._a_countdown_lbl.style().unpolish(self._a_countdown_lbl)
+        self._a_countdown_lbl.style().polish(self._a_countdown_lbl)
+        self._a_status_lbl.setText("⏰  Set an Alarm")
+        self._a_status_lbl.setStyleSheet(
+            f"font-size:13px; font-weight:700; color:{C_TEXT_DIM}; letter-spacing:1px;"
+        )
+
+    def _a_poll(self) -> None:
+        """Called every second to check if the alarm should fire."""
+        if not self._a_active:
+            return
+        now  = datetime.now()
+        tgt_h = self._a_hour_spin.value()
+        tgt_m = self._a_min_spin.value()
+
+        # Countdown to alarm
+        target_today = now.replace(hour=tgt_h, minute=tgt_m, second=0, microsecond=0)
+        if target_today <= now:
+            # Already past today's time — aim for tomorrow
+            target_today += timedelta(days=1)
+        diff = int((target_today - now).total_seconds())
+        h_left, rem = divmod(diff, 3600)
+        m_left, s_left = divmod(rem, 60)
+        if h_left > 0:
+            countdown_str = f"{h_left:02d}:{m_left:02d}:{s_left:02d}"
+        else:
+            countdown_str = f"{m_left:02d}:{s_left:02d}"
+        self._a_countdown_lbl.setText(countdown_str)
+
+        # Fire condition: same hour+minute, second 0–4
+        if now.hour == tgt_h and now.minute == tgt_m and not self._a_fired:
+            self._a_fired = True
+            self._a_fire_alarm()
+
+    def _a_fire_alarm(self) -> None:
+        """Alarm fires — show dismiss button and play sound."""
+        self._a_alarm_evt.clear()
+        self._a_stop_btn.show()
+        self._a_countdown_lbl.setObjectName("TimerDisplayAlert")
+        self._a_countdown_lbl.style().unpolish(self._a_countdown_lbl)
+        self._a_countdown_lbl.style().polish(self._a_countdown_lbl)
+        label = self._a_label_edit.text().strip() or "Alarm!"
+        self._a_status_lbl.setText(f"🔔  {label}")
+        self._a_status_lbl.setStyleSheet(
+            "font-size:13px; font-weight:700; color:#ff4555; letter-spacing:1px;"
+        )
+        threading.Thread(
+            target=self._play_alarm_sound,
+            args=(self._a_alarm_evt,),
+            daemon=True,
+        ).start()
+
+    # ══════════════════════════════════════════════════════════════════════════
+    #  WIDGET LIFECYCLE
+    # ══════════════════════════════════════════════════════════════════════════
+
+    def _on_close(self) -> None:
+        self._t_stop_alarm()
+        self._a_stop()
+        self._a_poll_timer.stop()
+        super()._on_close()
 
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -809,7 +1133,7 @@ class EditTaskDialog(QDialog):
     def __init__(self, title: str = "", description: str = "", parent=None):
         super().__init__(parent, Qt.FramelessWindowHint | Qt.Dialog)
         self.setAttribute(Qt.WA_TranslucentBackground, True)
-        self.setMinimumWidth(340)
+        self.setMinimumWidth(380)
         self._build_ui(title, description)
 
     def _build_ui(self, title: str, description: str) -> None:
@@ -922,8 +1246,8 @@ class TodoWidget(FloatingWidget):
 
     def __init__(self, widget_id: str, data_ref: dict, x: int = 200, y: int = 200):
         super().__init__("📝  To-Do", widget_id, data_ref, x, y)
-        self.setMinimumWidth(310)
-        self.setMaximumWidth(420)
+        self.setMinimumWidth(360)
+        self.setMaximumWidth(460)
         self._build_todo_ui()
 
     def _build_todo_ui(self) -> None:
@@ -1023,8 +1347,8 @@ class ClipboardArchiveDialog(QDialog):
     def __init__(self, clipboard_widget, parent=None):
         super().__init__(parent, Qt.FramelessWindowHint | Qt.Dialog)
         self.setAttribute(Qt.WA_TranslucentBackground, True)
-        self.setMinimumWidth(380)
-        self.setMinimumHeight(450)
+        self.setMinimumWidth(420)
+        self.setMinimumHeight(480)
         self._clipboard_widget = clipboard_widget
         self._build_ui()
 
@@ -1132,7 +1456,7 @@ class ClipboardWidget(FloatingWidget):
     def __init__(self, widget_id: str, data_ref: dict,
                  x: int = 200, y: int = 200):
         super().__init__("📋  Clipboard History", widget_id, data_ref, x, y)
-        self.setFixedWidth(310)
+        self.setFixedWidth(340)
         self._history: list[dict] = self._load_history()
         self._last_hash: str = ""
         self._build_clipboard_ui()
@@ -1313,13 +1637,13 @@ class PomodoroWidget(FloatingWidget):
     """
     WIDGET_TYPE = "pomodoro"
 
-    _WORK_SECS  = 1 * 60
+    _WORK_SECS  = 25 * 60
     _BREAK_SECS =  5 * 60
 
     def __init__(self, widget_id: str, data_ref: dict,
                  x: int = 200, y: int = 200):
         super().__init__("🍅  Pomodoro", widget_id, data_ref, x, y)
-        self.setFixedWidth(290)
+        self.setFixedWidth(330)
         self._state    = "WORK"           # "WORK" | "BREAK"
         self._running  = False
         self._remaining = self._WORK_SECS
@@ -1427,19 +1751,21 @@ class PomodoroWidget(FloatingWidget):
 
     def _on_phase_end(self) -> None:
         """Switch phases; increment session counter if WORK just ended."""
+        # Set your sound file path here (use a full or relative path)
+        sound_file = "pomo.wav"   # <-- change this to your file
         if self._state == "WORK":
             self._sessions += 1
             _save_pomodoro_sessions(self._sessions)
-            # Play a short chime on a background thread to stay non-blocking
-            threading.Thread(
-                target=lambda: winsound.MessageBeep(winsound.MB_ICONASTERISK),
-                daemon=True,
-            ).start()
+            # Play the sound file asynchronously
+            winsound.PlaySound(sound_file, winsound.SND_FILENAME | winsound.SND_ASYNC)
             self._state     = "BREAK"
             self._remaining = self._BREAK_SECS
         else:
+            # Play the same sound when going from BREAK to WORK
+            winsound.PlaySound(sound_file, winsound.SND_FILENAME | winsound.SND_ASYNC)
             self._state     = "WORK"
             self._remaining = self._WORK_SECS
+            
         self._update_display()
         # Auto-start the next phase
         self._toggle()
@@ -1484,9 +1810,12 @@ class PomodoroWidget(FloatingWidget):
 
 # Default whitelist — window title OR exe name contains one of these (case-insensitive)
 _RADAR_DEFAULT_WHITELIST = [
-    "code", "visual studio", "chrome", "firefox", "edge",
-    "notion", "todoist", "notepad", "word", "excel", "pycharm",
-    "terminal", "powershell", "cmd", "widjett",
+    "code", "visual studio", "chrome", "firefox",
+    "todoist", "notepad", "word", "excel", "pycharm",
+    "terminal", "powershell", "cmd", "widjett", "python", "antigravity ide", 
+    "whatsapp", "discord", "yasb", "task switching", "search", "calculator", "notepad++",
+    "settings", "task manager",
+       
 ]
 
 
@@ -1505,7 +1834,7 @@ class InterruptionRadarWidget(FloatingWidget):
     def __init__(self, widget_id: str, data_ref: dict,
                  x: int = 200, y: int = 200):
         super().__init__("🎯  Interruption Radar", widget_id, data_ref, x, y)
-        self.setFixedWidth(310)
+        self.setFixedWidth(360)
 
         self._whitelist         = list(_RADAR_DEFAULT_WHITELIST)
         self._distraction_count = 0
@@ -1557,23 +1886,30 @@ class InterruptionRadarWidget(FloatingWidget):
         self._log_list.setFocusPolicy(Qt.NoFocus)
         self.add_to_content(self._log_list)
 
-        # Whitelist editor
+        # Whitelist editor — add row
+        wl_hdr = QLabel("Whitelist  (double-click to remove)")
+        wl_hdr.setStyleSheet(f"color:{C_TEXT_DIM}; font-size:10px; letter-spacing:0.5px;")
+        self.add_to_content(wl_hdr)
+
         wl_row = QHBoxLayout()
         self._wl_input = QLineEdit()
-        self._wl_input.setPlaceholderText("Add to whitelist…")
-        add_btn = QPushButton("＋")
-        add_btn.setFixedWidth(30)
+        self._wl_input.setPlaceholderText("Add app name…")
+        add_btn = QPushButton("＋ Add")
+        add_btn.setFixedWidth(58)
         add_btn.clicked.connect(self._add_to_whitelist)
         self._wl_input.returnPressed.connect(self._add_to_whitelist)
         wl_row.addWidget(self._wl_input)
         wl_row.addWidget(add_btn)
         self.add_layout_to_content(wl_row)
 
-        wl_hint = QLabel(f"Whitelist: {', '.join(self._whitelist[:4])}…")
-        wl_hint.setStyleSheet(f"color:{C_TEXT_DIM}; font-size:10px;")
-        wl_hint.setWordWrap(True)
-        self._wl_hint_lbl = wl_hint
-        self.add_to_content(wl_hint)
+        # Scrollable whitelist view with remove-on-double-click
+        self._wl_list = QListWidget()
+        self._wl_list.setMaximumHeight(72)
+        self._wl_list.setFocusPolicy(Qt.NoFocus)
+        self._wl_list.setToolTip("Double-click an entry to remove it from the whitelist")
+        self._wl_list.itemDoubleClicked.connect(self._remove_from_whitelist)
+        self.add_to_content(self._wl_list)
+        self._refresh_wl_list()
 
     # ── background monitor thread ──────────────────────────────────────────────
 
@@ -1714,14 +2050,25 @@ class InterruptionRadarWidget(FloatingWidget):
 
     # ── whitelist management ───────────────────────────────────────────────────
 
+    def _refresh_wl_list(self) -> None:
+        self._wl_list.clear()
+        for kw in self._whitelist:
+            item = QListWidgetItem(f"  {kw}")
+            item.setData(Qt.UserRole, kw)
+            self._wl_list.addItem(item)
+
     def _add_to_whitelist(self) -> None:
         kw = self._wl_input.text().strip().lower()
         if kw and kw not in self._whitelist:
             self._whitelist.append(kw)
-            self._wl_hint_lbl.setText(
-                f"Whitelist: {', '.join(self._whitelist[:4])}…"
-            )
+            self._refresh_wl_list()
         self._wl_input.clear()
+
+    def _remove_from_whitelist(self, item: QListWidgetItem) -> None:
+        kw = item.data(Qt.UserRole)
+        if kw and kw in self._whitelist:
+            self._whitelist.remove(kw)
+            self._refresh_wl_list()
 
     def _on_close(self) -> None:
         self._stop_monitor.set()
@@ -1809,7 +2156,7 @@ class KeystrokeWidget(FloatingWidget):
     def __init__(self, widget_id: str, data_ref: dict,
                  x: int = 200, y: int = 200):
         super().__init__("⌨️  Keystroke Rhythm", widget_id, data_ref, x, y)
-        self.setFixedWidth(300)
+        self.setFixedWidth(340)
 
         # Thread-safe event queue: each item is (timestamp, is_backspace)
         self._key_queue: queue.Queue = queue.Queue()
@@ -1862,13 +2209,24 @@ class KeystrokeWidget(FloatingWidget):
         self._canvas = _WpmCanvas()
         self.add_to_content(self._canvas)
 
+        # pynput unavailable — show persistent notice
+        if not _HAS_PYNPUT:
+            no_pynput = QLabel("⚠  pynput not installed.\nRun: pip install pynput")
+            no_pynput.setWordWrap(True)
+            no_pynput.setAlignment(Qt.AlignCenter)
+            no_pynput.setStyleSheet(
+                "background: rgba(200,160,30,160); border-radius:8px;"
+                "color:#1a1a00; font-weight:700; padding:8px; font-size:11px;"
+            )
+            self.add_to_content(no_pynput)
+
         # Brain-fog warning (hidden by default)
         self._fog_lbl = QLabel("🧠 Brain fog detected. Stand up for 60 seconds.")
         self._fog_lbl.setWordWrap(True)
         self._fog_lbl.setAlignment(Qt.AlignCenter)
         self._fog_lbl.setStyleSheet(
-            "background: rgba(220,80,80,180); border-radius:6px;"
-            f"color:white; font-weight:600; padding:6px; font-size:11px;"
+            "background: rgba(235,75,75,190); border-radius:9px;"
+            f"color:white; font-weight:700; padding:7px; font-size:11px;"
         )
         self._fog_lbl.hide()
         self.add_to_content(self._fog_lbl)
@@ -1976,7 +2334,7 @@ class TopographyWidget(FloatingWidget):
     def __init__(self, widget_id: str, data_ref: dict,
                  x: int = 200, y: int = 200):
         super().__init__("🗂️  Desktop Topography", widget_id, data_ref, x, y)
-        self.setFixedWidth(320)
+        self.setFixedWidth(360)
 
         user_home = Path.home()
         self._folders = {
@@ -2241,7 +2599,7 @@ class MoodMosaicWidget(FloatingWidget):
         self._current_time_str = ""
         self._current_period   = "morning"
         super().__init__("🎨  Mood Mosaic", widget_id, data_ref, x, y)
-        self.setFixedWidth(240)
+        self.setFixedWidth(280)
         self._build_mosaic_ui()
 
     def _build_mosaic_ui(self) -> None:
@@ -2251,7 +2609,7 @@ class MoodMosaicWidget(FloatingWidget):
 
         # The colour tile — a QLabel we paint manually
         self._tile = QLabel()
-        self._tile.setFixedSize(216, 200)
+        self._tile.setFixedSize(252, 210)
         self._tile.setAlignment(Qt.AlignCenter)
         self._tile.setCursor(QCursor(Qt.PointingHandCursor))
 
@@ -2335,6 +2693,329 @@ class MoodMosaicWidget(FloatingWidget):
 
 
 # ─────────────────────────────────────────────────────────────────────────────
+#  Smart Notes Floating Widget  (singleton)
+# ─────────────────────────────────────────────────────────────────────────────
+
+class SmartNotesFloatingWidget(FloatingWidget):
+    """
+    Thin FloatingWidget shell that hosts the SmartNotesWidget panel.
+    Singleton — only one instance allowed at a time.
+    """
+    WIDGET_TYPE = "smartnotes"
+
+    def __init__(self, widget_id: str, data_ref: dict,
+                 x: int = 200, y: int = 200):
+        super().__init__("📒  Smart Notes", widget_id, data_ref, x, y)
+        self.setMinimumWidth(420)
+        self.setMinimumHeight(500)
+        self.resize(520, 580)
+        self._build_notes_ui()
+
+    def _build_notes_ui(self) -> None:
+        self._content_layout.setContentsMargins(0, 0, 0, 0)
+        self._content_layout.setSpacing(0)
+
+        if _HAS_SMARTNOTES:
+            self._notes_panel = _SmartNotesWidget(self._content_widget)
+            self._notes_panel.setSizePolicy(
+                QSizePolicy.Expanding, QSizePolicy.Expanding
+            )
+            self.add_to_content(self._notes_panel)
+        else:
+            err = QLabel(
+                "⚠️  SmartNotesWidget could not be loaded.\n"
+                "Check that widgets/smartnotes.py is present."
+            )
+            err.setAlignment(Qt.AlignCenter)
+            err.setStyleSheet(f"color: {C_ACCENT3}; font-size: 12px;")
+            self.add_to_content(err)
+
+    def _apply_saved_colors(self) -> None:
+        super()._apply_saved_colors()
+        if hasattr(self, '_notes_panel') and hasattr(self._notes_panel, 'apply_theme'):
+            colors = self._data_ref.get("hub_colors")
+            if colors and "header" in colors and "body" in colors:
+                self._notes_panel.apply_theme(colors["header"], colors["body"])
+            else:
+                self._notes_panel.apply_theme(None, None)
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+#  Hub Customizer Dialog
+# ─────────────────────────────────────────────────────────────────────────────
+
+class _HubCustomizeDialog(QDialog):
+    """
+    Lets the user pick:
+      • Header background color (any RGBA, including fully transparent)
+      • Body background color (any RGBA, including fully transparent)
+    Changes are applied live to the hub card.
+    """
+
+    def __init__(self, card: QFrame, data_ref: dict, parent=None):
+        super().__init__(parent, Qt.FramelessWindowHint | Qt.Dialog)
+        self.setAttribute(Qt.WA_TranslucentBackground, True)
+        self._card = card
+        self._data_ref = data_ref
+        
+        # read current colors from persisted data or defaults
+        colors = self._data_ref.get("hub_colors", {})
+        # ensure we make a copy so we don't mutate the data ref unintentionally until apply
+        self._header_rgba = list(colors.get("header", [24, 24, 38, 248]))
+        self._body_rgba   = list(colors.get("body", [14, 14, 22, 240]))
+        
+        self._drag_pos = QPoint()
+        self._dragging = False
+        self._build_ui()
+
+    # ── UI ────────────────────────────────────────────────────────────────────
+
+    def _build_ui(self) -> None:
+        outer = QVBoxLayout(self)
+        outer.setContentsMargins(8, 8, 8, 8)
+
+        card = QFrame()
+        card.setObjectName("DialogCard")
+        card.installEventFilter(self)
+
+        # Apply hub theme colors to the dialog card so it matches the rest of the app
+        colors = self._data_ref.get("hub_colors", {})
+        hr = colors.get("header", [24, 24, 38, 248])
+        br = colors.get("body",   [14, 14, 22, 240])
+        card.setStyleSheet(
+            f"#DialogCard {{"
+            f"  background: qlineargradient("
+            f"    x1:0, y1:0, x2:0, y2:1,"
+            f"    stop:0 rgba({hr[0]},{hr[1]},{hr[2]},{min(hr[3], 252)}),"
+            f"    stop:0.3 rgba({br[0]},{br[1]},{br[2]},{min(br[3], 252)})"
+            f"  );"
+            f"  border: 1px solid rgba({hr[0]},{hr[1]},{hr[2]},120);"
+            f"  border-radius: 16px;"
+            f"}}"
+        )
+        self._dialog_card = card
+        vlay = QVBoxLayout(card)
+        vlay.setContentsMargins(20, 16, 20, 18)
+        vlay.setSpacing(14)
+
+        # header
+        hdr_row = QHBoxLayout()
+        hdr = QLabel("🎨  Customize Hub")
+        hdr.setStyleSheet(f"font-size:15px; font-weight:800; color:{C_TEXT};")
+        hdr_row.addWidget(hdr)
+        hdr_row.addStretch()
+        x_btn = QPushButton("✕")
+        x_btn.setObjectName("CloseBtn")
+        x_btn.setFixedSize(26, 26)
+        x_btn.clicked.connect(self.reject)
+        hdr_row.addWidget(x_btn)
+        vlay.addLayout(hdr_row)
+
+        sep = QFrame(); sep.setFrameShape(QFrame.HLine)
+        sep.setStyleSheet(f"background:{C_BORDER}; border:none; max-height:1px;")
+        vlay.addWidget(sep)
+
+        # ── Header background ─────────────────────────────────────────────────
+        vlay.addWidget(self._make_section_label("Header Background"))
+        self._header_preview = self._make_color_preview(self._header_rgba)
+        self._header_alpha   = self._make_alpha_spinbox(self._header_rgba[3])
+        row_h = QHBoxLayout()
+        row_h.setSpacing(8)
+        pick_h = QPushButton("Pick Color")
+        pick_h.clicked.connect(self._pick_header_color)
+        row_h.addWidget(self._header_preview)
+        row_h.addWidget(pick_h)
+        row_h.addWidget(QLabel("Alpha:"))
+        row_h.addWidget(self._header_alpha)
+        row_h.addStretch()
+        vlay.addLayout(row_h)
+
+        # ── Body background ───────────────────────────────────────────────────
+        vlay.addWidget(self._make_section_label("Body Background"))
+        self._body_preview = self._make_color_preview(self._body_rgba)
+        self._body_alpha   = self._make_alpha_spinbox(self._body_rgba[3])
+        row_b = QHBoxLayout()
+        row_b.setSpacing(8)
+        pick_b = QPushButton("Pick Color")
+        pick_b.clicked.connect(self._pick_body_color)
+        row_b.addWidget(self._body_preview)
+        row_b.addWidget(pick_b)
+        row_b.addWidget(QLabel("Alpha:"))
+        row_b.addWidget(self._body_alpha)
+        row_b.addStretch()
+        vlay.addLayout(row_b)
+
+        # tip
+        tip = QLabel("Set alpha to 0 for fully transparent background.")
+        tip.setStyleSheet(f"color:{C_TEXT_DIM}; font-size:10px;")
+        vlay.addWidget(tip)
+
+        sep2 = QFrame(); sep2.setFrameShape(QFrame.HLine)
+        sep2.setStyleSheet(f"background:{C_BORDER}; border:none; max-height:1px;")
+        vlay.addWidget(sep2)
+
+        # Apply / Reset buttons
+        btn_row = QHBoxLayout()
+        btn_row.setSpacing(8)
+        reset_btn = QPushButton("↺  Reset Defaults")
+        reset_btn.clicked.connect(self._reset_defaults)
+        btn_row.addWidget(reset_btn)
+        btn_row.addStretch()
+        apply_btn = QPushButton("✓  Apply")
+        apply_btn.setStyleSheet(
+            f"QPushButton {{background:rgba(157,141,245,200);"
+            f"border:1px solid {C_ACCENT};border-radius:9px;"
+            f"padding:6px 18px;color:white;font-weight:700;}}"
+            f"QPushButton:hover {{background:rgba(157,141,245,255);}}"
+        )
+        apply_btn.clicked.connect(self._apply)
+        btn_row.addWidget(apply_btn)
+        vlay.addLayout(btn_row)
+
+        outer.addWidget(card)
+        self.setMinimumWidth(380)
+
+    # ── helpers ───────────────────────────────────────────────────────────────
+
+    def _make_section_label(self, text: str) -> QLabel:
+        lbl = QLabel(text)
+        lbl.setStyleSheet(f"color:{C_TEXT}; font-size:12px; font-weight:700;")
+        return lbl
+
+    def _make_color_preview(self, rgba: list) -> QLabel:
+        lbl = QLabel()
+        lbl.setFixedSize(36, 28)
+        lbl.setStyleSheet(
+            f"background: rgba({rgba[0]},{rgba[1]},{rgba[2]},{rgba[3]});"
+            "border: 1px solid rgba(255,255,255,40); border-radius: 6px;"
+        )
+        return lbl
+
+    def _make_alpha_spinbox(self, value: int) -> QSpinBox:
+        sp = QSpinBox()
+        sp.setRange(0, 255)
+        sp.setValue(value)
+        sp.setFixedWidth(64)
+        sp.setFocusPolicy(Qt.StrongFocus)
+        return sp
+
+    def _update_preview(self, preview: QLabel, rgba: list, alpha_spin: QSpinBox):
+        rgba[3] = alpha_spin.value()
+        preview.setStyleSheet(
+            f"background: rgba({rgba[0]},{rgba[1]},{rgba[2]},{rgba[3]});"
+            "border: 1px solid rgba(255,255,255,40); border-radius: 6px;"
+        )
+
+    # ── color pickers ─────────────────────────────────────────────────────────
+
+    def _get_color(self, title: str, init_rgba: list) -> QColor:
+        dlg = QColorDialog(QColor(init_rgba[0], init_rgba[1], init_rgba[2], init_rgba[3]), self)
+        dlg.setWindowTitle(title)
+        dlg.setOption(QColorDialog.ShowAlphaChannel)
+        # Apply a stylesheet specifically for this dialog so it matches the dark theme
+        dlg.setStyleSheet("""
+            QColorDialog {
+                background: #1c1c2a;
+            }
+            QLabel {
+                color: #eeeef8;
+                background: transparent;
+            }
+            QPushButton {
+                background: #2b2b3b;
+                color: #eeeef8;
+                border: 1px solid rgba(255,255,255,40);
+                padding: 4px 12px;
+                border-radius: 4px;
+            }
+            QPushButton:hover {
+                background: #3b3b4b;
+            }
+            QSpinBox {
+                background: rgba(255,255,255,10);
+                color: #eeeef8;
+                border: 1px solid rgba(255,255,255,30);
+            }
+            QLineEdit {
+                background: rgba(255,255,255,10);
+                color: #eeeef8;
+            }
+        """)
+        if dlg.exec_() == QDialog.Accepted:
+            return dlg.currentColor()
+        return QColor()
+
+    def _pick_header_color(self) -> None:
+        col = self._get_color("Header Background Color", self._header_rgba)
+        if col.isValid():
+            self._header_rgba = [col.red(), col.green(), col.blue(), col.alpha()]
+            self._header_alpha.setValue(col.alpha())
+            self._update_preview(self._header_preview, self._header_rgba, self._header_alpha)
+
+    def _pick_body_color(self) -> None:
+        col = self._get_color("Body Background Color", self._body_rgba)
+        if col.isValid():
+            self._body_rgba = [col.red(), col.green(), col.blue(), col.alpha()]
+            self._body_alpha.setValue(col.alpha())
+            self._update_preview(self._body_preview, self._body_rgba, self._body_alpha)
+
+    # ── apply / reset ─────────────────────────────────────────────────────────
+
+    def _apply(self) -> None:
+        # Sync alpha spinboxes
+        self._header_rgba[3] = self._header_alpha.value()
+        self._body_rgba[3]   = self._body_alpha.value()
+        hr = list(self._header_rgba)
+        br = list(self._body_rgba)
+        
+        # Save to persistence
+        self._data_ref["hub_colors"] = {
+            "header": hr,
+            "body": br
+        }
+        save_data(self._data_ref)
+        
+        # Trigger global update
+        parent = self.parent()
+        if hasattr(parent, "_apply_saved_hub_colors"):
+            parent._apply_saved_hub_colors()
+            
+        self.accept()
+
+    def _reset_defaults(self) -> None:
+        self._header_rgba = [24, 24, 38, 248]
+        self._body_rgba   = [14, 14, 22, 240]
+        self._update_preview(self._header_preview, self._header_rgba, self._header_alpha)
+        self._header_alpha.setValue(248)
+        self._update_preview(self._body_preview, self._body_rgba, self._body_alpha)
+        self._body_alpha.setValue(240)
+        
+        if "hub_colors" in self._data_ref:
+            del self._data_ref["hub_colors"]
+        save_data(self._data_ref)
+        
+        # Trigger global update
+        parent = self.parent()
+        if hasattr(parent, "_apply_saved_hub_colors"):
+            parent._apply_saved_hub_colors()
+
+    # ── drag to move dialog ───────────────────────────────────────────────────
+
+    def eventFilter(self, obj, event):
+        if event.type() == QEvent.MouseButtonPress and event.button() == Qt.LeftButton:
+            self._dragging = True
+            self._drag_pos = event.globalPos() - self.frameGeometry().topLeft()
+            return True
+        elif event.type() == QEvent.MouseMove and self._dragging:
+            self.move(event.globalPos() - self._drag_pos)
+            return True
+        elif event.type() == QEvent.MouseButtonRelease:
+            self._dragging = False
+            return True
+        return super().eventFilter(obj, event)
+
+
+# ─────────────────────────────────────────────────────────────────────────────
 #  Launcher
 # ─────────────────────────────────────────────────────────────────────────────
 
@@ -2357,7 +3038,7 @@ class Launcher(QWidget):
         self._radar_widget:     InterruptionRadarWidget  | None = None
         self._keystroke_widget: KeystrokeWidget          | None = None
         self._topography_widget:TopographyWidget         | None = None
-        self._mosaic_widget:    MoodMosaicWidget         | None = None
+        self._notes_widget:     SmartNotesFloatingWidget | None = None
 
         self._build_ui()
         self._build_tray()
@@ -2369,9 +3050,9 @@ class Launcher(QWidget):
         outer = QVBoxLayout(self)
         outer.setContentsMargins(8, 8, 8, 8)
 
-        card = QFrame()
-        card.setObjectName("Launcher")
-        cv = QVBoxLayout(card)
+        self._card = QFrame()
+        self._card.setObjectName("Launcher")
+        cv = QVBoxLayout(self._card)
         cv.setContentsMargins(20, 18, 20, 20)
         cv.setSpacing(10)
 
@@ -2399,54 +3080,54 @@ class Launcher(QWidget):
         hrow.addWidget(close_btn)
         cv.addLayout(hrow)
 
-        # separator
-        sep = QFrame()
-        sep.setFrameShape(QFrame.HLine)
-        sep.setStyleSheet(f"background:{C_BORDER}; border:none; max-height:1px;")
-        cv.addWidget(sep)
-
-        # spawn buttons
+        # ── spawn buttons (keep: clock, timer, todo, clipboard, notes) ─────────
         self._btn_clock = self._make_launch_btn(
-            "🕐  Add Clock Widget",  self._spawn_clock, "#7c6af7")
+            "🕐  Add Clock Widget",  self._spawn_clock,     "#7c6af7")
         self._btn_timer = self._make_launch_btn(
-            "⏱  Add Timer Widget",  self._spawn_timer, "#56cfb2")
+            "⏱  Add Timer & Alarm", self._spawn_timer,     "#56cfb2")
         self._btn_todo  = self._make_launch_btn(
-            "📝  Add To-Do Widget",  self._spawn_todo,  "#f79c6a")
+            "📝  Add To-Do Widget",  self._spawn_todo,      "#f79c6a")
+        self._btn_clipboard = self._make_launch_btn(
+            "📋  Clipboard History", self._spawn_clipboard, "#a78bfa")
+        self._btn_notes = self._make_launch_btn(
+            "📒  Smart Notes",       self._spawn_notes,     "#9d8df5")
+
+        # Keep hidden button attrs for close-map compatibility
+        self._btn_pomodoro   = None
+        self._btn_radar      = None
+        self._btn_keystroke  = None
+        self._btn_topography = None
 
         cv.addWidget(self._btn_clock)
         cv.addWidget(self._btn_timer)
         cv.addWidget(self._btn_todo)
-
-        # ── New widgets ──────────────────────────────────────────────────
-        sep2 = QFrame()
-        sep2.setFrameShape(QFrame.HLine)
-        sep2.setStyleSheet(f"background:{C_BORDER}; border:none; max-height:1px;")
-        cv.addWidget(sep2)
-
-        self._btn_clipboard = self._make_launch_btn(
-            "📋  Clipboard History", self._spawn_clipboard, "#a78bfa")
-        self._btn_pomodoro  = self._make_launch_btn(
-            "🍅  Pomodoro Tracker",  self._spawn_pomodoro,  "#f87171")
-        self._btn_radar     = self._make_launch_btn(
-            "🎯  Interruption Radar", self._spawn_radar,    "#34d399")
-        self._btn_keystroke = self._make_launch_btn(
-            "⌨️  Keystroke Rhythm",  self._spawn_keystroke, "#60a5fa")
-        self._btn_topography= self._make_launch_btn(
-            "🗂️  Desktop Topography",self._spawn_topography,"#fbbf24")
-        self._btn_mosaic    = self._make_launch_btn(
-            "🎨  Mood Mosaic",       self._spawn_mosaic,    "#f472b6")
-
         cv.addWidget(self._btn_clipboard)
-        cv.addWidget(self._btn_pomodoro)
-        cv.addWidget(self._btn_radar)
-        cv.addWidget(self._btn_keystroke)
-        cv.addWidget(self._btn_topography)
-        cv.addWidget(self._btn_mosaic)
+        cv.addWidget(self._btn_notes)
 
-        outer.addWidget(card)
-        self.setFixedWidth(295)
+        # separator
+        sep = QFrame()
+        sep.setFrameShape(QFrame.HLine)
+        sep.setStyleSheet(f"background:{C_BORDER}; border:none; max-height:1px; margin:2px 0;")
+        cv.addWidget(sep)
 
-        card.installEventFilter(self)
+        # Customize button
+        self._btn_customize = QPushButton("🎨  Customize Hub")
+        self._btn_customize.setObjectName("LaunchBtn")
+        self._btn_customize.setStyleSheet(
+            "#LaunchBtn { text-align: left; }"
+            "#LaunchBtn:hover { border-left: 3px solid #f472b6; }"
+        )
+        self._btn_customize.clicked.connect(self._open_customize)
+        cv.addWidget(self._btn_customize)
+
+        outer.addWidget(self._card)
+        self.setFixedWidth(330)
+
+        self._card.installEventFilter(self)
+        
+        # Apply custom colors if they were saved previously
+        self._apply_saved_hub_colors()
+
 
     def _make_launch_btn(self, label: str, slot, color: str) -> QPushButton:
         btn = QPushButton(label)
@@ -2589,9 +3270,10 @@ class Launcher(QWidget):
         x, y = self._default_pos()
         w = cls(self._next_widget_id(), self._data_ref, x, y)
         setattr(self, attr, w)
-        btn = getattr(self, btn_attr)
-        btn.setEnabled(False)
-        btn.setToolTip(f"{label} is already open")
+        btn = getattr(self, btn_attr, None)
+        if btn is not None:
+            btn.setEnabled(False)
+            btn.setToolTip(f"{label} is already open")
         self._register(w, type_key, x, y)
 
     def _spawn_clipboard(self)  -> None:
@@ -2602,7 +3284,7 @@ class Launcher(QWidget):
     def _spawn_pomodoro(self)   -> None:
         self._spawn_singleton(
             "_pomodoro_widget", PomodoroWidget,
-            "_btn_pomodoro", "Pomodoro Tracker", "pomodoro")
+            "_btn_pomodoro", "Pomodoro", "pomodoro")
 
     def _spawn_radar(self)      -> None:
         self._spawn_singleton(
@@ -2619,10 +3301,42 @@ class Launcher(QWidget):
             "_topography_widget", TopographyWidget,
             "_btn_topography", "Desktop Topography", "topography")
 
-    def _spawn_mosaic(self)     -> None:
+    def _spawn_notes(self)      -> None:
         self._spawn_singleton(
-            "_mosaic_widget", MoodMosaicWidget,
-            "_btn_mosaic", "Mood Mosaic", "moodmosaic")
+            "_notes_widget", SmartNotesFloatingWidget,
+            "_btn_notes", "Smart Notes", "smartnotes")
+
+    # ── hub customization ─────────────────────────────────────────────────────
+
+    def _open_customize(self) -> None:
+        """Open the hub colour-customizer dialog."""
+        dlg = _HubCustomizeDialog(self._card, self._data_ref, self)
+        dlg.exec_()
+
+    def _apply_saved_hub_colors(self) -> None:
+        """Applies saved colors to the Launcher hub card and propagates to all open widgets."""
+        colors = self._data_ref.get("hub_colors")
+        if colors and "header" in colors and "body" in colors:
+            hr = colors["header"]
+            br = colors["body"]
+            self._card.setStyleSheet(
+                f"#Launcher {{"
+                f"  background: qlineargradient("
+                f"    x1:0, y1:0, x2:0, y2:0.25,"
+                f"    stop:0 rgba({hr[0]},{hr[1]},{hr[2]},{hr[3]}),"
+                f"    stop:0.25 rgba({br[0]},{br[1]},{br[2]},{br[3]})"
+                f"  );"
+                f"  border: 1px solid rgba(110,100,170,120);"
+                f"  border-radius: 18px;"
+                f"}}"
+            )
+        else:
+            self._card.setStyleSheet("")
+            
+        # Propagate to all open widgets
+        for w in self._widgets:
+            if hasattr(w, "_apply_saved_colors"):
+                w._apply_saved_colors()
 
     def _on_widget_closed(self, w: FloatingWidget) -> None:
         if w in self._widgets:
@@ -2630,20 +3344,22 @@ class Launcher(QWidget):
 
         # Map widget class → (attr name, button attr name)
         _close_map = [
-            (ClockWidget,             "_clock_widget",      "_btn_clock"),
-            (TodoWidget,              "_todo_widget",       "_btn_todo"),
-            (ClipboardWidget,         "_clipboard_widget",  "_btn_clipboard"),
-            (PomodoroWidget,          "_pomodoro_widget",   "_btn_pomodoro"),
-            (InterruptionRadarWidget, "_radar_widget",      "_btn_radar"),
-            (KeystrokeWidget,         "_keystroke_widget",  "_btn_keystroke"),
-            (TopographyWidget,        "_topography_widget", "_btn_topography"),
-            (MoodMosaicWidget,        "_mosaic_widget",     "_btn_mosaic"),
+            (ClockWidget,                "_clock_widget",      "_btn_clock"),
+            (TodoWidget,                 "_todo_widget",       "_btn_todo"),
+            (ClipboardWidget,            "_clipboard_widget",  "_btn_clipboard"),
+            (PomodoroWidget,             "_pomodoro_widget",   "_btn_pomodoro"),
+            (InterruptionRadarWidget,    "_radar_widget",      "_btn_radar"),
+            (KeystrokeWidget,            "_keystroke_widget",  "_btn_keystroke"),
+            (TopographyWidget,           "_topography_widget", "_btn_topography"),
+            (SmartNotesFloatingWidget,   "_notes_widget",      "_btn_notes"),
         ]
         for cls, attr, btn_attr in _close_map:
             if isinstance(w, cls):
                 setattr(self, attr, None)
-                getattr(self, btn_attr).setEnabled(True)
-                getattr(self, btn_attr).setToolTip("")
+                btn = getattr(self, btn_attr)
+                if btn is not None:
+                    btn.setEnabled(True)
+                    btn.setToolTip("")
                 break
 
     # ── restore saved widgets ─────────────────────────────────────────────────
@@ -2658,7 +3374,7 @@ class Launcher(QWidget):
             "radar":      InterruptionRadarWidget,
             "keystrokes": KeystrokeWidget,
             "topography": TopographyWidget,
-            "moodmosaic": MoodMosaicWidget,
+            "smartnotes": SmartNotesFloatingWidget,
         }
         for entry in list(self._data_ref.get("widgets", [])):
             cls = TYPE_MAP.get(entry.get("type"))
@@ -2689,20 +3405,22 @@ class Launcher(QWidget):
 
             # Update singleton references and disable launch buttons
             _restore_map = [
-                (ClockWidget,             "_clock_widget",      "_btn_clock",      "Clock"),
-                (TodoWidget,              "_todo_widget",       "_btn_todo",       "To-Do"),
-                (ClipboardWidget,         "_clipboard_widget",  "_btn_clipboard",  "Clipboard History"),
-                (PomodoroWidget,          "_pomodoro_widget",   "_btn_pomodoro",   "Pomodoro"),
-                (InterruptionRadarWidget, "_radar_widget",      "_btn_radar",      "Interruption Radar"),
-                (KeystrokeWidget,         "_keystroke_widget",  "_btn_keystroke",  "Keystroke Rhythm"),
-                (TopographyWidget,        "_topography_widget", "_btn_topography", "Desktop Topography"),
-                (MoodMosaicWidget,        "_mosaic_widget",     "_btn_mosaic",     "Mood Mosaic"),
+                (ClockWidget,                "_clock_widget",      "_btn_clock",      "Clock"),
+                (TodoWidget,                 "_todo_widget",       "_btn_todo",       "To-Do"),
+                (ClipboardWidget,            "_clipboard_widget",  "_btn_clipboard",  "Clipboard History"),
+                (PomodoroWidget,             "_pomodoro_widget",   "_btn_pomodoro",   "Pomodoro"),
+                (InterruptionRadarWidget,    "_radar_widget",      "_btn_radar",      "Interruption Radar"),
+                (KeystrokeWidget,            "_keystroke_widget",  "_btn_keystroke",  "Keystroke Rhythm"),
+                (TopographyWidget,           "_topography_widget", "_btn_topography", "Desktop Topography"),
+                (SmartNotesFloatingWidget,   "_notes_widget",      "_btn_notes",      "Smart Notes"),
             ]
             for rcls, attr, btn_attr, label in _restore_map:
                 if cls is rcls:
                     setattr(self, attr, w)
-                    getattr(self, btn_attr).setEnabled(False)
-                    getattr(self, btn_attr).setToolTip(f"{label} is already open")
+                    btn = getattr(self, btn_attr)
+                    if btn is not None:
+                        btn.setEnabled(False)
+                        btn.setToolTip(f"{label} is already open")
                     break
 
 
@@ -2710,10 +3428,86 @@ class Launcher(QWidget):
 #  Entry point
 # ─────────────────────────────────────────────────────────────────────────────
 
+# ─────────────────────────────────────────────────────────────────────────────
+#  Single-instance guard
+# ─────────────────────────────────────────────────────────────────────────────
+
+def _acquire_single_instance_mutex() -> object:
+    """
+    Creates a named Windows mutex.  Returns the handle on success.
+    If the mutex already exists another instance is running — we exit.
+    Only active when frozen (EXE); ignored in dev mode so you can run
+    multiple terminals without locking yourself out.
+    """
+    if not getattr(sys, 'frozen', False):
+        return None
+    try:
+        handle = ctypes.windll.kernel32.CreateMutexW(None, True, "WidjettSingleInstanceMutex")
+        if ctypes.windll.kernel32.GetLastError() == 183:  # ERROR_ALREADY_EXISTS
+            sys.exit(0)   # already running — silently exit
+        return handle
+    except Exception:
+        return None
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+#  Windows startup registration  (HKCU — no admin required)
+# ─────────────────────────────────────────────────────────────────────────────
+
+_STARTUP_KEY  = r"Software\Microsoft\Windows\CurrentVersion\Run"
+_STARTUP_NAME = "Widjett"
+
+
+def _is_startup_registered() -> bool:
+    """Return True if our Run entry already exists and matches the current EXE path."""
+    try:
+        with winreg.OpenKey(winreg.HKEY_CURRENT_USER, _STARTUP_KEY) as key:
+            val, _ = winreg.QueryValueEx(key, _STARTUP_NAME)
+            return val == f'"{sys.executable}"'
+    except FileNotFoundError:
+        return False
+    except Exception:
+        return False
+
+
+def register_startup() -> None:
+    """
+    Write the current EXE into the HKCU Run key so Windows launches
+    Widjett automatically on every login.  Called once on first run;
+    subsequent launches skip the check after confirming it is already set.
+    Only runs when frozen (i.e. packaged as an EXE).
+    """
+    if not getattr(sys, 'frozen', False):
+        return  # dev mode — do nothing
+
+    if _is_startup_registered():
+        return  # already set up
+
+    exe_path = f'"{sys.executable}"'
+    try:
+        with winreg.OpenKey(
+            winreg.HKEY_CURRENT_USER, _STARTUP_KEY,
+            0, winreg.KEY_SET_VALUE
+        ) as key:
+            winreg.SetValueEx(key, _STARTUP_NAME, 0, winreg.REG_SZ, exe_path)
+        print(f"[INFO] Widjett registered for startup: {exe_path}")
+    except Exception as e:
+        print(f"[WARN] Could not register startup entry: {e}")
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+#  Entry point
+# ─────────────────────────────────────────────────────────────────────────────
+
 def main() -> None:
-    # Set AppUserModelID so Windows taskbar groups and shows the right icon
+    # ── Single-instance guard (EXE only) ─────────────────────────────────────
+    _mutex = _acquire_single_instance_mutex()
+
+    # ── Register as a Windows startup app on first run ────────────────────────
+    register_startup()
+
+    # ── Set AppUserModelID so Windows taskbar groups and shows the right icon ─
     if os.name == 'nt':
-        import ctypes
         myappid = 'viewsonic.widjett.app.1'
         try:
             ctypes.windll.shell32.SetCurrentProcessExplicitAppUserModelID(myappid)
