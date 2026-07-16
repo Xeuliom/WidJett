@@ -20,17 +20,19 @@ Glassmorphic UI · Customizable themes · Windows-native integration
 | Widget | Description |
 |---|---|
 | 🕐 **Clock** | Live digital clock with date display |
-| ⏱️ **Timer & Alarm** | Countdown timer + time-based alarm with sound |
+| 📅 **Calendar** | Monthly calendar grid with persistent custom events |
+| ⏱️ **Timer & Alarm** | Countdown timer + multi-alarm system (repeating days, editing, toggles) |
 | ✅ **Todo** | Task list with priorities, autosaved to disk |
 | 📋 **Clipboard** | Tracks last 12 clipboard entries across apps |
 | 📒 **Smart Notes** | Full note-taking panel with search and tagging |
 | 🎨 **Mood Mosaic** | Ambient colour tile driven by time of day |
-| 📡 **Radar** | Live CPU/RAM/disk usage monitor |
+| 🕌 **Prayer Times** | *(Coming Soon)* Live API integration with background countdowns |
 
 **Hub features:**
 - 🎨 Fully customizable widget theme (header + body RGBA)
+- 🖋️ Global custom font selection 
 - 📌 Pin (Always on Top) per widget
-- 🚀 Optional Windows startup via registry
+- 🚀 Optional Windows startup integration toggle
 - 💾 All data persisted in `%APPDATA%\widjett\`
 
 ---
@@ -92,8 +94,10 @@ All user data is stored in:
 
 ```
 %APPDATA%\widjett\
-├── data.json     # Widget positions, todos, theme colors
-└── notes.json    # Smart Notes content
+├── data.json              # Widget positions, todos, theme colors, global fonts
+├── notes.json             # Smart Notes content
+├── calendar_events.json   # Calendar widget events
+└── prayer_settings.json   # Prayer Times location settings
 ```
 
 These files are created automatically on first run.
@@ -105,10 +109,24 @@ These files are created automatically on first run.
 | Package | Use |
 |---|---|
 | `PyQt5` | UI framework (widgets, layouts, painting) |
+| `requests` | Live API polling (Prayer Times) |
 | `pywin32` | Windows clipboard, process, registry APIs |
 | `pynput` | Global hotkey listener |
 | `watchdog` | File system watcher for Smart Notes live reload |
 | `psutil` | CPU / RAM / disk metrics for Radar widget |
+
+---
+
+## 🔄 Changelog
+
+### v1.1.0 - Recent Updates
+- **Hub UI Overhaul**: Replaced "Customize Colors" with a unified "General Settings" menu. Added the ability to select a global custom font and toggle Run on Windows Startup.
+- **New Widget**: Added the `Calendar` widget featuring an interactive grid, current-day highlighting, and a persistent daily events editor.
+- **Alarm Widget Rework**: Completely rebuilt from a single timer into a fully-fledged multi-alarm system (like a smartphone). Features include repeating days ("Mon", "Tue"), individual on/off toggles, and edit/delete capabilities with proper UI formatting.
+- **Smart Notes**: Fixed a bug where hitting "Enter" for newlines would get mangled upon saving/reopening.
+- **Clipboard**: Widened the "Clear" button for correct rendering and themed the horizontal scrollbar to match the rest of the app's glassmorphic design.
+- **Prayer Times (Beta)**: Merged the backend logic for a new Aladhan API widget (currently disabled in UI pending final polish).
+- **Build Spec**: Updated `widjett.spec` to correctly bundle `requests`, `urllib3`, and `email` for seamless `.exe` generation.
 
 ---
 

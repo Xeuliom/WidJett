@@ -4,7 +4,7 @@
 import sys
 from PyInstaller.utils.hooks import collect_submodules, collect_data_files
 
-# ── Hidden imports required by PyQt5 + pynput + win32 ────────────────────────
+# ── Hidden imports required by PyQt5 + pynput + win32 + requests ─────────────
 hidden = [
     'winreg',
     'win32api', 'win32con', 'win32gui', 'win32process', 'win32clipboard',
@@ -15,6 +15,12 @@ hidden = [
     'psutil',
     'PyQt5', 'PyQt5.QtCore', 'PyQt5.QtGui', 'PyQt5.QtWidgets',
     'PyQt5.sip',
+    # requests and its dependencies (needed for Prayer Times widget)
+    'requests', 'requests.adapters', 'requests.auth', 'requests.cookies',
+    'requests.exceptions', 'requests.models', 'requests.sessions',
+    'certifi', 'urllib3', 'charset_normalizer', 'idna',
+    # stdlib modules used by new widgets
+    'calendar', 'json', 'uuid',
 ]
 
 a = Analysis(
@@ -24,14 +30,15 @@ a = Analysis(
     datas=[
         ('alarm.wav', '.'),
         ('logo.png',  '.'),
+        ('widgets',   'widgets'),
     ],
     hiddenimports=hidden,
     hookspath=[],
     hooksconfig={},
     runtime_hooks=[],
     excludes=[
-        'tkinter', 'unittest', 'email', 'html', 'http',
-        'urllib', 'xml', 'pydoc', 'doctest', 'difflib',
+        'tkinter', 'unittest',
+        'xml', 'pydoc', 'doctest', 'difflib',
         'distutils', 'setuptools', 'pkg_resources',
     ],
     noarchive=False,

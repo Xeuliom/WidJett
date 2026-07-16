@@ -346,7 +346,8 @@ class NoteEditDialog(QDialog):
         vlay.addWidget(self._title_edit)
 
         # ── body input ───────────────────────────────────────────────────────
-        self._body_edit = QTextEdit(self._note.get("body", ""))
+        self._body_edit = QTextEdit()
+        self._body_edit.setPlainText(self._note.get("body", ""))
         self._body_edit.setPlaceholderText("Take a note…")
         self._body_edit.setMinimumHeight(140)
         self._body_edit.setStyleSheet(
@@ -730,7 +731,7 @@ class SmartNotesWidget(QWidget):
 
             card = NoteCard(note)
             card.double_clicked.connect(self._open_edit_dialog)
-            self._grid_layout.addWidget(card, row, col)
+            self._grid_layout.addWidget(card, row, col, Qt.AlignTop | Qt.AlignLeft)
             col += 1
             if col >= cols:
                 col = 0

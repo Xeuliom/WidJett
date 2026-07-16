@@ -71,7 +71,7 @@ from PyQt5.QtWidgets import (
     QLineEdit, QSpinBox, QListWidget, QListWidgetItem,
     QDialog, QTextEdit, QFormLayout, QDialogButtonBox,
     QSystemTrayIcon, QMenu, QAction, QFrame, QSizePolicy,
-    QCheckBox, QTabWidget, QColorDialog,
+    QCheckBox, QTabWidget, QColorDialog, QComboBox, QGridLayout,
 )
 from PyQt5.QtCore import (
     QTimer, QPoint, pyqtSignal, QEvent, QSize,
@@ -81,7 +81,7 @@ from PyQt5.QtGui import (
     QLinearGradient,
 )
 from PyQt5.QtWidgets import (
-    QProgressBar, QScrollArea, QToolTip,
+    QProgressBar, QScrollArea, QToolTip, QStackedWidget
 )
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -278,6 +278,14 @@ QScrollBar::handle:vertical {{
     border-radius: 3px; min-height: 20px;
 }}
 QScrollBar::add-line:vertical, QScrollBar::sub-line:vertical {{ height:0; }}
+QScrollBar:horizontal {{
+    background: transparent; height: 5px; margin: 0;
+}}
+QScrollBar::handle:horizontal {{
+    background: rgba(255,255,255,45);
+    border-radius: 3px; min-width: 20px;
+}}
+QScrollBar::add-line:horizontal, QScrollBar::sub-line:horizontal {{ width:0; }}
 
 /* ── dialogs ────────────────────────────────── */
 #DialogCard {{
@@ -626,10 +634,29 @@ class ClockWidget(FloatingWidget):
 #  Timer Widget  (multiple instances allowed)
 # ─────────────────────────────────────────────────────────────────────────────
 
+ALARMS_FILE = get_data_dir() / "alarms.json"
+
+def _load_alarms() -> list:
+    try:
+        if ALARMS_FILE.exists():
+            import json
+            with open(ALARMS_FILE, "r", encoding="utf-8") as f:
+                return json.load(f)
+    except Exception:
+        pass
+    return []
+
+def _save_alarms(alarms: list) -> None:
+    try:
+        import json
+        with open(ALARMS_FILE, "w", encoding="utf-8") as f:
+            json.dump(alarms, f, indent=2)
+    except Exception as e:
+        print(f"[Alarm] Save failed: {e}")
+
 class TimerWidget(FloatingWidget):
     """
     Two-tab widget: Timer tab and Alarm tab.
-    Both run independently — switching tabs does NOT pause either.
     """
     WIDGET_TYPE = "timer"
 
@@ -675,12 +702,8 @@ class TimerWidget(FloatingWidget):
         else:
             self._tab_widget.setStyleSheet(getattr(self, '_default_tab_qss', ''))
 
-
-    # ── shared alarm-sound helper ──────────────────────────────────────────────
-
     @staticmethod
     def _play_alarm_sound(stop_evt: threading.Event) -> None:
-        """Blocking alarm loop — runs in a daemon thread."""
         if getattr(sys, 'frozen', False):
             external = Path(sys.executable).parent / "alarm.wav"
             custom = external if external.exists() else get_asset_path("alarm.wav")
@@ -710,26 +733,23 @@ class TimerWidget(FloatingWidget):
                     except Exception:
                         pass
 
-    # ── init ──────────────────────────────────────────────────────────────────
-
     def __init__(self, widget_id: str, data_ref: dict, x: int = 200, y: int = 200):
-        # Initialize state BEFORE super().__init__(), because the base class
-        # calls self._build_ui() which references these attributes.
         self._t_remaining   = 0
         self._t_running     = False
         self._t_flash_count = 0
         self._t_alarm_evt   = threading.Event()
-        self._a_active      = False
+        
+        self._alarms = _load_alarms()
         self._a_alarm_evt   = threading.Event()
-        self._a_fired       = False
+        self._last_fired_alarm_id = None
+        self._last_fired_minute = -1
+        self._editing_alarm_id = None
 
         super().__init__("⏱  Timer & Alarm", widget_id, data_ref, x, y)
-        self.setFixedWidth(360)
-
-    # ── main UI (tabs) ────────────────────────────────────────────────────────
+        self.setFixedWidth(380)
 
     def _build_ui(self) -> None:
-        super()._build_ui()   # ← sets up _content_layout, title bar, etc.
+        super()._build_ui()
         self._content_layout.setContentsMargins(8, 8, 8, 10)
         self._content_layout.setSpacing(0)
 
@@ -763,7 +783,7 @@ class TimerWidget(FloatingWidget):
             }}
             """
         self._tab_widget.setStyleSheet(self._default_tab_qss)
-        self._apply_saved_colors() # apply theme colors if any
+        self._apply_saved_colors()
 
         # ── Timer tab ─────────────────────────────────────────────────────────
         timer_page = QWidget()
@@ -822,95 +842,32 @@ class TimerWidget(FloatingWidget):
         self._t_stop_alarm_btn.hide()
         self._t_stop_alarm_btn.clicked.connect(self._t_stop_alarm)
         t_lay.addWidget(self._t_stop_alarm_btn)
-
         self._tab_widget.addTab(timer_page, "⏱  Timer")
 
-        # ── Alarm tab ─────────────────────────────────────────────────────────
-        alarm_page = QWidget()
-        alarm_page.setStyleSheet("background: transparent;")
-        a_lay = QVBoxLayout(alarm_page)
-        a_lay.setContentsMargins(12, 18, 12, 14)
-        a_lay.setSpacing(12)
+        # ── Alarm tab (Stacked) ───────────────────────────────────────────────
+        self._alarm_page = QWidget()
+        self._alarm_page.setStyleSheet("background: transparent;")
+        a_lay = QVBoxLayout(self._alarm_page)
+        a_lay.setContentsMargins(0,0,0,0)
 
-        # Clock icon + status
-        self._a_status_lbl = QLabel("⏰  Set an Alarm")
-        self._a_status_lbl.setAlignment(Qt.AlignCenter)
-        self._a_status_lbl.setStyleSheet(
-            f"font-size:13px; font-weight:700; color:{C_TEXT_DIM}; letter-spacing:1px;"
-        )
-        a_lay.addWidget(self._a_status_lbl)
+        self._alarm_stack = QStackedWidget()
+        a_lay.addWidget(self._alarm_stack)
 
-        # Big countdown display (hidden until alarm is active)
-        self._a_countdown_lbl = QLabel("")
-        self._a_countdown_lbl.setObjectName("TimerDisplay")
-        self._a_countdown_lbl.setAlignment(Qt.AlignCenter)
-        self._a_countdown_lbl.hide()
-        a_lay.addWidget(self._a_countdown_lbl)
+        self._build_alarm_list_ui()
+        self._build_alarm_edit_ui()
 
-        # Time input row (HH : MM)
-        time_row = QHBoxLayout()
-        time_row.setSpacing(6)
-        time_row.addStretch()
-
-        lbl_h2 = QLabel("Hour")
-        lbl_h2.setStyleSheet(f"color:{C_TEXT_DIM}; font-size:11px;")
-        self._a_hour_spin = QSpinBox()
-        self._a_hour_spin.setRange(0, 23)
-        self._a_hour_spin.setFixedWidth(58)
-        self._a_hour_spin.setFocusPolicy(Qt.StrongFocus)
-        now = datetime.now()
-        self._a_hour_spin.setValue(now.hour)
-
-        colon = QLabel(":")
-        colon.setStyleSheet(f"color:{C_TEXT}; font-size:16px; font-weight:700;")
-
-        lbl_m2 = QLabel("Min")
-        lbl_m2.setStyleSheet(f"color:{C_TEXT_DIM}; font-size:11px;")
-        self._a_min_spin = QSpinBox()
-        self._a_min_spin.setRange(0, 59)
-        self._a_min_spin.setFixedWidth(58)
-        self._a_min_spin.setFocusPolicy(Qt.StrongFocus)
-        self._a_min_spin.setValue((now.minute + 1) % 60)
-
-        time_row.addWidget(lbl_h2)
-        time_row.addWidget(self._a_hour_spin)
-        time_row.addWidget(colon)
-        time_row.addWidget(lbl_m2)
-        time_row.addWidget(self._a_min_spin)
-        time_row.addStretch()
-        a_lay.addLayout(time_row)
-
-        # Label row (optional label)
-        self._a_label_edit = QLineEdit()
-        self._a_label_edit.setPlaceholderText("Alarm label (optional)…")
-        self._a_label_edit.setFocusPolicy(Qt.StrongFocus)
-        a_lay.addWidget(self._a_label_edit)
-
-        # Set / Cancel buttons
-        a_btn_row = QHBoxLayout()
-        a_btn_row.setSpacing(6)
-        self._a_set_btn    = QPushButton("🔔  Set Alarm")
-        self._a_cancel_btn = QPushButton("✕  Cancel")
-        self._a_cancel_btn.setEnabled(False)
-        self._a_set_btn.clicked.connect(self._a_set)
-        self._a_cancel_btn.clicked.connect(self._a_cancel)
-        a_btn_row.addWidget(self._a_set_btn)
-        a_btn_row.addWidget(self._a_cancel_btn)
-        a_lay.addLayout(a_btn_row)
-
-        # Stop alarm button (hidden until alarm fires)
+        # Stop alarm button (overlay for when alarm rings)
         self._a_stop_btn = QPushButton("🔕  Dismiss Alarm")
         self._a_stop_btn.setStyleSheet(
             "QPushButton{background:rgba(220,60,60,200);border:1px solid rgba(255,100,100,180);"
-            "border-radius:7px;font-weight:700;padding:6px;}"
+            "border-radius:7px;font-weight:700;padding:10px;font-size:16px; margin:10px;}"
             "QPushButton:hover{background:rgba(255,80,80,230);}"
         )
         self._a_stop_btn.hide()
         self._a_stop_btn.clicked.connect(self._a_stop)
         a_lay.addWidget(self._a_stop_btn)
 
-        a_lay.addStretch()
-        self._tab_widget.addTab(alarm_page, "⏰  Alarm")
+        self._tab_widget.addTab(self._alarm_page, "⏰  Alarm")
         self._content_layout.addWidget(self._tab_widget)
 
         # ── internal QTimers ──────────────────────────────────────────────────
@@ -922,14 +879,301 @@ class TimerWidget(FloatingWidget):
         self._t_flash_timer.setInterval(400)
         self._t_flash_timer.timeout.connect(self._t_flash)
 
-        # Alarm polling — checks wall clock every second
         self._a_poll_timer = QTimer(self)
         self._a_poll_timer.setInterval(1000)
         self._a_poll_timer.timeout.connect(self._a_poll)
         self._a_poll_timer.start()
 
+    def _build_alarm_list_ui(self) -> None:
+        page = QWidget()
+        lay = QVBoxLayout(page)
+        lay.setContentsMargins(8, 8, 8, 8)
+        lay.setSpacing(10)
+
+        # Add button
+        top_row = QHBoxLayout()
+        top_row.addStretch()
+        self._a_add_btn = QPushButton("＋ Add Alarm")
+        self._a_add_btn.setStyleSheet(
+            f"QPushButton{{background:rgba(157,141,245,180); border:1px solid {{C_ACCENT}};"
+            f"border-radius:6px; padding:4px 12px; font-weight:bold;}}"
+            f"QPushButton:hover{{background:rgba(157,141,245,220);}}"
+        )
+        self._a_add_btn.clicked.connect(self._a_new)
+        top_row.addWidget(self._a_add_btn)
+        lay.addLayout(top_row)
+
+        self._alarm_scroll = QScrollArea()
+        self._alarm_scroll.setWidgetResizable(True)
+        self._alarm_scroll.setHorizontalScrollBarPolicy(Qt.ScrollBarAlwaysOff)
+        self._alarm_scroll.setStyleSheet("QScrollArea{background:transparent;border:none;}")
+        
+        self._alarm_list_container = QWidget()
+        self._alarm_list_container.setStyleSheet("background:transparent;")
+        self._alarm_list_layout = QVBoxLayout(self._alarm_list_container)
+        self._alarm_list_layout.setContentsMargins(0,0,0,0)
+        self._alarm_list_layout.setSpacing(6)
+        self._alarm_list_layout.addStretch()
+
+        self._alarm_scroll.setWidget(self._alarm_list_container)
+        lay.addWidget(self._alarm_scroll)
+
+        self._alarm_stack.addWidget(page)
+        self._refresh_alarm_list()
+
+    def _build_alarm_edit_ui(self) -> None:
+        page = QWidget()
+        lay = QVBoxLayout(page)
+        lay.setContentsMargins(12, 12, 12, 12)
+        lay.setSpacing(12)
+
+        title = QLabel("Edit Alarm")
+        title.setStyleSheet(f"font-size:14px; font-weight:bold; color:{C_TEXT};")
+        lay.addWidget(title)
+
+        time_row = QHBoxLayout()
+        self._a_hour_spin = QSpinBox()
+        self._a_hour_spin.setRange(0, 23)
+        self._a_hour_spin.setFixedWidth(60)
+        self._a_hour_spin.setStyleSheet("font-size:24px; padding:4px;")
+        
+        colon = QLabel(":")
+        colon.setStyleSheet("font-size:24px; font-weight:bold;")
+        
+        self._a_min_spin = QSpinBox()
+        self._a_min_spin.setRange(0, 59)
+        self._a_min_spin.setFixedWidth(60)
+        self._a_min_spin.setStyleSheet("font-size:24px; padding:4px;")
+
+        time_row.addStretch()
+        time_row.addWidget(self._a_hour_spin)
+        time_row.addWidget(colon)
+        time_row.addWidget(self._a_min_spin)
+        time_row.addStretch()
+        lay.addLayout(time_row)
+
+        self._a_label_edit = QLineEdit()
+        self._a_label_edit.setPlaceholderText("Alarm Label...")
+        lay.addWidget(self._a_label_edit)
+
+        # Days picker
+        days_row = QHBoxLayout()
+        days_row.setSpacing(4)
+        self._day_btns = []
+        day_names = ["Mon", "Tue", "Wed", "Thu", "Fri", "Sat", "Sun"]
+        for i, d in enumerate(day_names):
+            b = QPushButton(d)
+            b.setCheckable(True)
+            b.setFixedHeight(26)
+            b.setStyleSheet(
+                "QPushButton{background:rgba(255,255,255,10); border:1px solid rgba(255,255,255,20);"
+                " border-radius:4px; color:#eeeef8; font-family:'Segoe UI'; font-size:10px; padding:2px 4px;}"
+                f"QPushButton:checked{{background:rgba(157,141,245,200); border:1px solid {C_ACCENT}; font-weight:bold; color:white;}}"
+            )
+            self._day_btns.append(b)
+            days_row.addWidget(b)
+        lay.addLayout(days_row)
+
+        # Buttons
+        btn_row = QHBoxLayout()
+        save_btn = QPushButton("Save")
+        save_btn.setStyleSheet(f"background:rgba(157,141,245,180); font-weight:bold; padding:6px;")
+        save_btn.clicked.connect(self._a_save)
+        cancel_btn = QPushButton("Cancel")
+        cancel_btn.clicked.connect(lambda: self._alarm_stack.setCurrentIndex(0))
+        
+        btn_row.addWidget(cancel_btn)
+        btn_row.addWidget(save_btn)
+        lay.addLayout(btn_row)
+        
+        lay.addStretch()
+        self._alarm_stack.addWidget(page)
+
+    def _refresh_alarm_list(self) -> None:
+        # clear existing
+        while self._alarm_list_layout.count() > 1:
+            item = self._alarm_list_layout.takeAt(0)
+            if item.widget():
+                item.widget().deleteLater()
+
+        for alarm in self._alarms:
+            card = QFrame()
+            card.setStyleSheet(
+                f"QFrame{{background:rgba(255,255,255,8); border:1px solid rgba(255,255,255,15); border-radius:8px;}}"
+            )
+            c_lay = QHBoxLayout(card)
+            c_lay.setContentsMargins(12, 8, 12, 8)
+            
+            # Left side: Time, Label, Days
+            l_lay = QVBoxLayout()
+            l_lay.setSpacing(2)
+            time_lbl = QLabel(f"{alarm['hour']:02d}:{alarm['minute']:02d}")
+            time_lbl.setStyleSheet(f"font-size:20px; font-weight:bold; border:none; background:transparent;")
+            
+            lbl_text = alarm.get('label', '')
+            if not lbl_text:
+                lbl_text = "Alarm"
+            
+            days = alarm.get('days', [])
+            if not days:
+                days_text = "Once"
+            elif len(days) == 7:
+                days_text = "Every day"
+            else:
+                day_names = ["Mon", "Tue", "Wed", "Thu", "Fri", "Sat", "Sun"]
+                days_text = ", ".join([day_names[d] for d in days])
+                
+            sub_lbl = QLabel(f"{lbl_text} • {days_text}")
+            sub_lbl.setStyleSheet(f"font-size:11px; color:{C_TEXT_DIM}; border:none; background:transparent;")
+            sub_lbl.setWordWrap(True)
+            
+            l_lay.addWidget(time_lbl)
+            l_lay.addWidget(sub_lbl)
+            c_lay.addLayout(l_lay)
+            c_lay.addStretch()
+            
+            # Right side: Edit, Delete, Toggle
+            _card_font = QFont("Segoe UI", 9)
+            edit_btn = QPushButton("Edit")
+            edit_btn.setFixedHeight(26)
+            edit_btn.setFont(_card_font)
+            edit_btn.setStyleSheet(f"QPushButton{{background:rgba(255,255,255,15); border:none; border-radius:4px; color:{C_TEXT}; padding: 0 10px;}}")
+            edit_btn.clicked.connect(lambda checked, aid=alarm['id']: self._a_edit(aid))
+            
+            del_btn = QPushButton("Del")
+            del_btn.setFixedHeight(26)
+            del_btn.setFont(_card_font)
+            del_btn.setStyleSheet("QPushButton{background:rgba(235,75,75,180); border:none; border-radius:4px; color:white; padding: 0 10px;}")
+            del_btn.clicked.connect(lambda checked, aid=alarm['id']: self._a_delete(aid))
+            
+            toggle_cb = QCheckBox()
+            toggle_cb.setChecked(alarm.get('active', True))
+            toggle_cb.setStyleSheet(
+                "QCheckBox::indicator { width: 34px; height: 18px; }"
+                "QCheckBox::indicator:unchecked { image: none; border-radius: 9px; background: rgba(255,255,255,30); border: 1px solid rgba(255,255,255,40); }"
+                "QCheckBox::indicator:checked { image: none; border-radius: 9px; background: rgba(93,214,181,180); border: 1px solid rgba(93,214,181,255); }"
+            )
+            toggle_cb.toggled.connect(lambda checked, aid=alarm['id']: self._a_toggle(aid, checked))
+            
+            c_lay.addWidget(edit_btn)
+            c_lay.addWidget(del_btn)
+            c_lay.addWidget(toggle_cb)
+            
+            self._alarm_list_layout.insertWidget(self._alarm_list_layout.count() - 1, card)
+
+    def _a_new(self) -> None:
+        self._editing_alarm_id = None
+        now = datetime.now()
+        self._a_hour_spin.setValue(now.hour)
+        self._a_min_spin.setValue((now.minute + 1) % 60)
+        self._a_label_edit.setText("")
+        for btn in self._day_btns:
+            btn.setChecked(False)
+        self._alarm_stack.setCurrentIndex(1)
+
+    def _a_edit(self, aid: str) -> None:
+        alarm = next((a for a in self._alarms if a['id'] == aid), None)
+        if not alarm: return
+        self._editing_alarm_id = aid
+        self._a_hour_spin.setValue(alarm.get('hour', 0))
+        self._a_min_spin.setValue(alarm.get('minute', 0))
+        self._a_label_edit.setText(alarm.get('label', ''))
+        days = alarm.get('days', [])
+        for i, btn in enumerate(self._day_btns):
+            btn.setChecked(i in days)
+        self._alarm_stack.setCurrentIndex(1)
+
+    def _a_delete(self, aid: str) -> None:
+        self._alarms = [a for a in self._alarms if a['id'] != aid]
+        _save_alarms(self._alarms)
+        self._refresh_alarm_list()
+
+    def _a_toggle(self, aid: str, active: bool) -> None:
+        for a in self._alarms:
+            if a['id'] == aid:
+                a['active'] = active
+        _save_alarms(self._alarms)
+
+    def _a_save(self) -> None:
+        days = [i for i, btn in enumerate(self._day_btns) if btn.isChecked()]
+        if self._editing_alarm_id:
+            # Edit existing
+            for a in self._alarms:
+                if a['id'] == self._editing_alarm_id:
+                    a['hour'] = self._a_hour_spin.value()
+                    a['minute'] = self._a_min_spin.value()
+                    a['label'] = self._a_label_edit.text().strip()
+                    a['days'] = days
+                    a['active'] = True
+        else:
+            # New alarm
+            import uuid
+            self._alarms.append({
+                'id': str(uuid.uuid4()),
+                'hour': self._a_hour_spin.value(),
+                'minute': self._a_min_spin.value(),
+                'label': self._a_label_edit.text().strip(),
+                'days': days,
+                'active': True
+            })
+        
+        # Sort by hour, then minute
+        self._alarms.sort(key=lambda a: (a['hour'], a['minute']))
+        _save_alarms(self._alarms)
+        self._alarm_stack.setCurrentIndex(0)
+        self._refresh_alarm_list()
+
+    def _a_poll(self) -> None:
+        now = datetime.now()
+        cur_h = now.hour
+        cur_m = now.minute
+        cur_w = now.weekday()
+
+        for a in self._alarms:
+            if not a.get('active', False):
+                continue
+            if a['hour'] == cur_h and a['minute'] == cur_m:
+                days = a.get('days', [])
+                if not days or cur_w in days:
+                    # Time and day match
+                    if self._last_fired_alarm_id == a['id'] and self._last_fired_minute == cur_m:
+                        continue # Already fired this minute
+                    
+                    self._last_fired_alarm_id = a['id']
+                    self._last_fired_minute = cur_m
+                    self._a_fire_alarm(a)
+                    
+                    if not days:
+                        # One time alarm, turn off
+                        a['active'] = False
+                        _save_alarms(self._alarms)
+                        self._refresh_alarm_list()
+
+    def _a_fire_alarm(self, alarm: dict) -> None:
+        self._a_alarm_evt.clear()
+        self._alarm_scroll.hide()
+        self._a_add_btn.hide()
+        self._a_stop_btn.setText(f"🔕  Dismiss\n\n{alarm['hour']:02d}:{alarm['minute']:02d} - {alarm.get('label', 'Alarm')}")
+        self._a_stop_btn.show()
+        
+        threading.Thread(
+            target=self._play_alarm_sound,
+            args=(self._a_alarm_evt,),
+            daemon=True,
+        ).start()
+
+    def _a_stop(self) -> None:
+        self._a_alarm_evt.set()
+        try:
+            winsound.PlaySound(None, winsound.SND_ASYNC)
+        except Exception:
+            pass
+        self._a_stop_btn.hide()
+        self._alarm_scroll.show()
+        self._a_add_btn.show()
+
     # ══════════════════════════════════════════════════════════════════════════
-    #  TIMER TAB LOGIC
+    #  TIMER TAB LOGIC (unchanged)
     # ══════════════════════════════════════════════════════════════════════════
 
     def _t_start(self) -> None:
@@ -1018,105 +1262,6 @@ class TimerWidget(FloatingWidget):
         self._t_display.setObjectName("TimerDisplay")
         self._t_display.style().unpolish(self._t_display)
         self._t_display.style().polish(self._t_display)
-
-    # ══════════════════════════════════════════════════════════════════════════
-    #  ALARM TAB LOGIC
-    # ══════════════════════════════════════════════════════════════════════════
-
-    def _a_set(self) -> None:
-        """Set the alarm for the next occurrence of the chosen HH:MM."""
-        self._a_fired = False
-        self._a_alarm_evt.clear()
-        self._a_active = True
-        self._a_set_btn.setEnabled(False)
-        self._a_cancel_btn.setEnabled(True)
-        self._a_hour_spin.setEnabled(False)
-        self._a_min_spin.setEnabled(False)
-        self._a_label_edit.setEnabled(False)
-        h = self._a_hour_spin.value()
-        m = self._a_min_spin.value()
-        label = self._a_label_edit.text().strip() or f"Alarm at {h:02d}:{m:02d}"
-        self._a_status_lbl.setText(f"⏰  {label}")
-        self._a_status_lbl.setStyleSheet(
-            f"font-size:13px; font-weight:700; color:{C_ACCENT2}; letter-spacing:1px;"
-        )
-        self._a_countdown_lbl.show()
-
-    def _a_cancel(self) -> None:
-        self._a_stop()
-
-    def _a_stop(self) -> None:
-        """Dismiss / cancel the alarm."""
-        self._a_active = False
-        self._a_fired  = False
-        self._a_alarm_evt.set()
-        try:
-            winsound.PlaySound(None, winsound.SND_ASYNC)
-        except Exception:
-            pass
-        self._a_set_btn.setEnabled(True)
-        self._a_cancel_btn.setEnabled(False)
-        self._a_hour_spin.setEnabled(True)
-        self._a_min_spin.setEnabled(True)
-        self._a_label_edit.setEnabled(True)
-        self._a_stop_btn.hide()
-        self._a_countdown_lbl.hide()
-        self._a_countdown_lbl.setObjectName("")
-        self._a_countdown_lbl.style().unpolish(self._a_countdown_lbl)
-        self._a_countdown_lbl.style().polish(self._a_countdown_lbl)
-        self._a_status_lbl.setText("⏰  Set an Alarm")
-        self._a_status_lbl.setStyleSheet(
-            f"font-size:13px; font-weight:700; color:{C_TEXT_DIM}; letter-spacing:1px;"
-        )
-
-    def _a_poll(self) -> None:
-        """Called every second to check if the alarm should fire."""
-        if not self._a_active:
-            return
-        now  = datetime.now()
-        tgt_h = self._a_hour_spin.value()
-        tgt_m = self._a_min_spin.value()
-
-        # Countdown to alarm
-        target_today = now.replace(hour=tgt_h, minute=tgt_m, second=0, microsecond=0)
-        if target_today <= now:
-            # Already past today's time — aim for tomorrow
-            target_today += timedelta(days=1)
-        diff = int((target_today - now).total_seconds())
-        h_left, rem = divmod(diff, 3600)
-        m_left, s_left = divmod(rem, 60)
-        if h_left > 0:
-            countdown_str = f"{h_left:02d}:{m_left:02d}:{s_left:02d}"
-        else:
-            countdown_str = f"{m_left:02d}:{s_left:02d}"
-        self._a_countdown_lbl.setText(countdown_str)
-
-        # Fire condition: same hour+minute, second 0–4
-        if now.hour == tgt_h and now.minute == tgt_m and not self._a_fired:
-            self._a_fired = True
-            self._a_fire_alarm()
-
-    def _a_fire_alarm(self) -> None:
-        """Alarm fires — show dismiss button and play sound."""
-        self._a_alarm_evt.clear()
-        self._a_stop_btn.show()
-        self._a_countdown_lbl.setObjectName("TimerDisplayAlert")
-        self._a_countdown_lbl.style().unpolish(self._a_countdown_lbl)
-        self._a_countdown_lbl.style().polish(self._a_countdown_lbl)
-        label = self._a_label_edit.text().strip() or "Alarm!"
-        self._a_status_lbl.setText(f"🔔  {label}")
-        self._a_status_lbl.setStyleSheet(
-            "font-size:13px; font-weight:700; color:#ff4555; letter-spacing:1px;"
-        )
-        threading.Thread(
-            target=self._play_alarm_sound,
-            args=(self._a_alarm_evt,),
-            daemon=True,
-        ).start()
-
-    # ══════════════════════════════════════════════════════════════════════════
-    #  WIDGET LIFECYCLE
-    # ══════════════════════════════════════════════════════════════════════════
 
     def _on_close(self) -> None:
         self._t_stop_alarm()
@@ -1490,7 +1635,7 @@ class ClipboardWidget(FloatingWidget):
         lbl = QLabel("Today's Copies")
         lbl.setStyleSheet(f"color:{C_TEXT_DIM}; font-size:11px;")
         clear_btn = QPushButton("Clear")
-        clear_btn.setFixedWidth(52)
+        clear_btn.setFixedWidth(70)
         clear_btn.clicked.connect(self._clear_history)
         hrow.addWidget(lbl)
         hrow.addStretch()
@@ -2741,29 +2886,60 @@ class SmartNotesFloatingWidget(FloatingWidget):
 
 
 # ─────────────────────────────────────────────────────────────────────────────
-#  Hub Customizer Dialog
+#  General Settings Dialog
 # ─────────────────────────────────────────────────────────────────────────────
 
-class _HubCustomizeDialog(QDialog):
+def _apply_global_font(font_name: str) -> None:
+    """Updates the GLOBAL_QSS with the new font and re-applies to the QApplication."""
+    global GLOBAL_QSS
+    import re
+    family = next((f for n, f in _FONT_OPTIONS if n == font_name), _FONT_OPTIONS[0][1])
+    # Replace the existing font-family declaration in QWidget { ... }
+    GLOBAL_QSS = re.sub(
+        r'font-family:\s*[^;]+;',
+        f'font-family: {family};',
+        GLOBAL_QSS
+    )
+    app = QApplication.instance()
+    if app:
+        app.setStyleSheet(GLOBAL_QSS)
+
+
+# Curated font list: (display name, font-family CSS string)
+_FONT_OPTIONS = [
+    ("Inter (Default)",    '"Inter", "Segoe UI Variable Display", "Segoe UI", "Roboto", sans-serif'),
+    ("Segoe UI Variable",  '"Segoe UI Variable Display", "Segoe UI", sans-serif'),
+    ("Roboto",             '"Roboto", "Segoe UI", sans-serif'),
+    ("Poppins",            '"Poppins", "Segoe UI", sans-serif'),
+    ("Outfit",             '"Outfit", "Segoe UI", sans-serif'),
+    ("JetBrains Mono",     '"JetBrains Mono", "Consolas", "Courier New", monospace'),
+    ("Courier New",        '"Courier New", monospace'),
+]
+
+
+class _GeneralSettingsDialog(QDialog):
     """
-    Lets the user pick:
-      • Header background color (any RGBA, including fully transparent)
-      • Body background color (any RGBA, including fully transparent)
-    Changes are applied live to the hub card.
+    General Settings panel with two tabs:
+      • Appearance — widget color theme + font selection
+      • Startup    — toggle Windows auto-launch on login
+    All changes are persisted to data.json.
     """
 
     def __init__(self, card: QFrame, data_ref: dict, parent=None):
         super().__init__(parent, Qt.FramelessWindowHint | Qt.Dialog)
         self.setAttribute(Qt.WA_TranslucentBackground, True)
-        self._card = card
+        self._card     = card
         self._data_ref = data_ref
-        
-        # read current colors from persisted data or defaults
+
+        # Colors (copied so we don't mutate data_ref until Apply)
         colors = self._data_ref.get("hub_colors", {})
-        # ensure we make a copy so we don't mutate the data ref unintentionally until apply
         self._header_rgba = list(colors.get("header", [24, 24, 38, 248]))
-        self._body_rgba   = list(colors.get("body", [14, 14, 22, 240]))
-        
+        self._body_rgba   = list(colors.get("body",   [14, 14, 22, 240]))
+
+        # Font
+        saved_font_name = self._data_ref.get("hub_font", "Inter (Default)")
+        self._selected_font_name = saved_font_name
+
         self._drag_pos = QPoint()
         self._dragging = False
         self._build_ui()
@@ -2778,7 +2954,7 @@ class _HubCustomizeDialog(QDialog):
         card.setObjectName("DialogCard")
         card.installEventFilter(self)
 
-        # Apply hub theme colors to the dialog card so it matches the rest of the app
+        # Apply hub theme colors to the dialog card
         colors = self._data_ref.get("hub_colors", {})
         hr = colors.get("header", [24, 24, 38, 248])
         br = colors.get("body",   [14, 14, 22, 240])
@@ -2796,11 +2972,11 @@ class _HubCustomizeDialog(QDialog):
         self._dialog_card = card
         vlay = QVBoxLayout(card)
         vlay.setContentsMargins(20, 16, 20, 18)
-        vlay.setSpacing(14)
+        vlay.setSpacing(12)
 
-        # header
+        # ── dialog header ─────────────────────────────────────────────────────
         hdr_row = QHBoxLayout()
-        hdr = QLabel("🎨  Customize Hub")
+        hdr = QLabel("⚙️  General Settings")
         hdr.setStyleSheet(f"font-size:15px; font-weight:800; color:{C_TEXT};")
         hdr_row.addWidget(hdr)
         hdr_row.addStretch()
@@ -2815,46 +2991,47 @@ class _HubCustomizeDialog(QDialog):
         sep.setStyleSheet(f"background:{C_BORDER}; border:none; max-height:1px;")
         vlay.addWidget(sep)
 
-        # ── Header background ─────────────────────────────────────────────────
-        vlay.addWidget(self._make_section_label("Header Background"))
-        self._header_preview = self._make_color_preview(self._header_rgba)
-        self._header_alpha   = self._make_alpha_spinbox(self._header_rgba[3])
-        row_h = QHBoxLayout()
-        row_h.setSpacing(8)
-        pick_h = QPushButton("Pick Color")
-        pick_h.clicked.connect(self._pick_header_color)
-        row_h.addWidget(self._header_preview)
-        row_h.addWidget(pick_h)
-        row_h.addWidget(QLabel("Alpha:"))
-        row_h.addWidget(self._header_alpha)
-        row_h.addStretch()
-        vlay.addLayout(row_h)
+        # ── tab widget ────────────────────────────────────────────────────────
+        tabs = QTabWidget()
+        tabs.setStyleSheet(f"""
+            QTabWidget::pane {{
+                border: 1px solid rgba(255,255,255,18);
+                border-radius: 10px;
+                background: rgba(255,255,255,4);
+                margin-top: -1px;
+            }}
+            QTabBar::tab {{
+                background: rgba(255,255,255,6);
+                color: {C_TEXT_DIM};
+                border: 1px solid rgba(255,255,255,20);
+                border-bottom: none;
+                border-top-left-radius: 8px;
+                border-top-right-radius: 8px;
+                padding: 7px 20px;
+                font-size: 12px;
+                font-weight: 600;
+                margin-right: 3px;
+            }}
+            QTabBar::tab:selected {{
+                background: rgba(157,141,245,130);
+                color: {C_TEXT};
+                border-color: {C_ACCENT};
+            }}
+            QTabBar::tab:hover:!selected {{
+                background: rgba(157,141,245,50);
+                color: {C_TEXT};
+            }}
+        """)
+        vlay.addWidget(tabs)
 
-        # ── Body background ───────────────────────────────────────────────────
-        vlay.addWidget(self._make_section_label("Body Background"))
-        self._body_preview = self._make_color_preview(self._body_rgba)
-        self._body_alpha   = self._make_alpha_spinbox(self._body_rgba[3])
-        row_b = QHBoxLayout()
-        row_b.setSpacing(8)
-        pick_b = QPushButton("Pick Color")
-        pick_b.clicked.connect(self._pick_body_color)
-        row_b.addWidget(self._body_preview)
-        row_b.addWidget(pick_b)
-        row_b.addWidget(QLabel("Alpha:"))
-        row_b.addWidget(self._body_alpha)
-        row_b.addStretch()
-        vlay.addLayout(row_b)
+        tabs.addTab(self._build_appearance_tab(), "🎨  Appearance")
+        tabs.addTab(self._build_startup_tab(),    "⚙️  Startup")
 
-        # tip
-        tip = QLabel("Set alpha to 0 for fully transparent background.")
-        tip.setStyleSheet(f"color:{C_TEXT_DIM}; font-size:10px;")
-        vlay.addWidget(tip)
-
+        # ── bottom action buttons ─────────────────────────────────────────────
         sep2 = QFrame(); sep2.setFrameShape(QFrame.HLine)
         sep2.setStyleSheet(f"background:{C_BORDER}; border:none; max-height:1px;")
         vlay.addWidget(sep2)
 
-        # Apply / Reset buttons
         btn_row = QHBoxLayout()
         btn_row.setSpacing(8)
         reset_btn = QPushButton("↺  Reset Defaults")
@@ -2873,13 +3050,218 @@ class _HubCustomizeDialog(QDialog):
         vlay.addLayout(btn_row)
 
         outer.addWidget(card)
-        self.setMinimumWidth(380)
+        self.setMinimumWidth(420)
+
+    # ── Appearance tab ────────────────────────────────────────────────────────
+
+    def _build_appearance_tab(self) -> QWidget:
+        page = QWidget()
+        page.setStyleSheet("background: transparent;")
+        lay = QVBoxLayout(page)
+        lay.setContentsMargins(14, 14, 14, 14)
+        lay.setSpacing(12)
+
+        # ── Colors section ────────────────────────────────────────────────────
+        lay.addWidget(self._make_section_label("Widget Colors"))
+
+        # Header color row
+        lay.addWidget(self._make_subsection_label("Header Background"))
+        self._header_preview = self._make_color_preview(self._header_rgba)
+        self._header_alpha   = self._make_alpha_spinbox(self._header_rgba[3])
+        self._header_alpha.valueChanged.connect(
+            lambda v: self._update_preview(self._header_preview, self._header_rgba, self._header_alpha)
+        )
+        row_h = QHBoxLayout(); row_h.setSpacing(8)
+        pick_h = QPushButton("Pick Color")
+        pick_h.setFixedWidth(90)
+        pick_h.clicked.connect(self._pick_header_color)
+        row_h.addWidget(self._header_preview)
+        row_h.addWidget(pick_h)
+        row_h.addWidget(QLabel("Alpha:"))
+        row_h.addWidget(self._header_alpha)
+        row_h.addStretch()
+        lay.addLayout(row_h)
+
+        # Body color row
+        lay.addWidget(self._make_subsection_label("Body Background"))
+        self._body_preview = self._make_color_preview(self._body_rgba)
+        self._body_alpha   = self._make_alpha_spinbox(self._body_rgba[3])
+        self._body_alpha.valueChanged.connect(
+            lambda v: self._update_preview(self._body_preview, self._body_rgba, self._body_alpha)
+        )
+        row_b = QHBoxLayout(); row_b.setSpacing(8)
+        pick_b = QPushButton("Pick Color")
+        pick_b.setFixedWidth(90)
+        pick_b.clicked.connect(self._pick_body_color)
+        row_b.addWidget(self._body_preview)
+        row_b.addWidget(pick_b)
+        row_b.addWidget(QLabel("Alpha:"))
+        row_b.addWidget(self._body_alpha)
+        row_b.addStretch()
+        lay.addLayout(row_b)
+
+        tip = QLabel("Set alpha to 0 for a fully transparent background.")
+        tip.setStyleSheet(f"color:{C_TEXT_DIM}; font-size:10px;")
+        lay.addWidget(tip)
+
+        # separator
+        sep = QFrame(); sep.setFrameShape(QFrame.HLine)
+        sep.setStyleSheet(f"background:{C_BORDER}; border:none; max-height:1px; margin:4px 0;")
+        lay.addWidget(sep)
+
+        # ── Font section ──────────────────────────────────────────────────────
+        lay.addWidget(self._make_section_label("App Font"))
+
+        font_row = QHBoxLayout(); font_row.setSpacing(10)
+
+        self._font_combo = QComboBox()
+        self._font_combo.setFixedHeight(32)
+        self._font_combo.setStyleSheet(f"""
+            QComboBox {{
+                background: rgba(255,255,255,8);
+                border: 1px solid rgba(255,255,255,22);
+                border-radius: 8px;
+                padding: 4px 10px;
+                color: {C_TEXT};
+                font-size: 12px;
+            }}
+            QComboBox:focus {{
+                border-color: {C_ACCENT};
+                background: rgba(157,141,245,15);
+            }}
+            QComboBox::drop-down {{
+                border: none;
+                width: 28px;
+            }}
+            QComboBox::down-arrow {{
+                image: none;
+                width: 0;
+            }}
+            QComboBox QAbstractItemView {{
+                background: rgba(28,28,42,248);
+                border: 1px solid {C_BORDER};
+                border-radius: 8px;
+                color: {C_TEXT};
+                selection-background-color: rgba(157,141,245,130);
+                padding: 4px;
+                outline: none;
+            }}
+            QComboBox QAbstractItemView::item {{
+                padding: 6px 12px;
+                border-radius: 5px;
+            }}
+        """)
+
+        # Populate and pre-select
+        for name, _ in _FONT_OPTIONS:
+            self._font_combo.addItem(name)
+        saved = self._data_ref.get("hub_font", "Inter (Default)")
+        idx = next((i for i, (n, _) in enumerate(_FONT_OPTIONS) if n == saved), 0)
+        self._font_combo.setCurrentIndex(idx)
+        self._font_combo.currentIndexChanged.connect(self._on_font_changed)
+
+        font_row.addWidget(self._font_combo, 1)
+        lay.addLayout(font_row)
+
+        # Live preview label
+        self._font_preview = QLabel("The quick brown fox jumps over the lazy dog  0123456789")
+        self._font_preview.setWordWrap(True)
+        self._font_preview.setStyleSheet(
+            f"color:{C_TEXT}; font-size:12px;"
+            f"background:rgba(255,255,255,5); border:1px solid rgba(255,255,255,12);"
+            f"border-radius:8px; padding:8px 10px;"
+        )
+        self._update_font_preview()
+        lay.addWidget(self._font_preview)
+
+        lay.addStretch()
+        return page
+
+    # ── Startup tab ───────────────────────────────────────────────────────────
+
+    def _build_startup_tab(self) -> QWidget:
+        page = QWidget()
+        page.setStyleSheet("background: transparent;")
+        lay = QVBoxLayout(page)
+        lay.setContentsMargins(14, 18, 14, 14)
+        lay.setSpacing(14)
+
+        lay.addWidget(self._make_section_label("Windows Startup"))
+
+        # Toggle row
+        toggle_row = QHBoxLayout()
+        toggle_row.setSpacing(12)
+
+        self._startup_check = QCheckBox("Launch Widjett when Windows starts")
+        self._startup_check.setStyleSheet(f"""
+            QCheckBox {{
+                font-size: 13px;
+                color: {C_TEXT};
+                spacing: 10px;
+            }}
+            QCheckBox::indicator {{
+                width: 20px; height: 20px; border-radius: 6px;
+                border: 1px solid rgba(255,255,255,40);
+                background: rgba(255,255,255,7);
+            }}
+            QCheckBox::indicator:checked {{
+                background: {C_ACCENT};
+                border-color: {C_ACCENT};
+            }}
+            QCheckBox::indicator:hover {{
+                border-color: {C_ACCENT};
+            }}
+        """)
+
+        is_frozen = getattr(sys, 'frozen', False)
+        if is_frozen:
+            self._startup_check.setChecked(_is_startup_registered())
+            self._startup_check.setEnabled(True)
+            self._startup_check.stateChanged.connect(self._on_startup_toggled)
+        else:
+            self._startup_check.setChecked(False)
+            self._startup_check.setEnabled(False)
+
+        toggle_row.addWidget(self._startup_check)
+        toggle_row.addStretch()
+        lay.addLayout(toggle_row)
+
+        # Info / status label
+        if is_frozen:
+            info_text = (
+                "When enabled, Widjett will automatically start in the system tray\n"
+                "every time you log into Windows. You can disable this at any time."
+            )
+        else:
+            info_text = (
+                "ℹ️  Startup control is only available in the packaged EXE.\n"
+                "Run the installed version of Widjett to manage this setting."
+            )
+        info_lbl = QLabel(info_text)
+        info_lbl.setWordWrap(True)
+        info_lbl.setStyleSheet(
+            f"color:{C_TEXT_DIM}; font-size:11px;"
+            f"background:rgba(255,255,255,5); border:1px solid rgba(255,255,255,10);"
+            f"border-radius:8px; padding:10px 12px;"
+        )
+        lay.addWidget(info_lbl)
+
+        lay.addStretch()
+        return page
 
     # ── helpers ───────────────────────────────────────────────────────────────
 
     def _make_section_label(self, text: str) -> QLabel:
         lbl = QLabel(text)
-        lbl.setStyleSheet(f"color:{C_TEXT}; font-size:12px; font-weight:700;")
+        lbl.setStyleSheet(
+            f"color:{C_TEXT}; font-size:13px; font-weight:800; letter-spacing:0.5px;"
+            f"padding-bottom:2px;"
+        )
+        return lbl
+
+    def _make_subsection_label(self, text: str) -> QLabel:
+        lbl = QLabel(text)
+        lbl.setStyleSheet(f"color:{C_TEXT_DIM}; font-size:11px; font-weight:600;")
         return lbl
 
     def _make_color_preview(self, rgba: list) -> QLabel:
@@ -2906,40 +3288,47 @@ class _HubCustomizeDialog(QDialog):
             "border: 1px solid rgba(255,255,255,40); border-radius: 6px;"
         )
 
+    # ── font helpers ──────────────────────────────────────────────────────────
+
+    def _on_font_changed(self, index: int) -> None:
+        self._selected_font_name = _FONT_OPTIONS[index][0]
+        self._update_font_preview()
+
+    def _update_font_preview(self) -> None:
+        name = self._selected_font_name
+        family = next((f for n, f in _FONT_OPTIONS if n == name), _FONT_OPTIONS[0][1])
+        self._font_preview.setStyleSheet(
+            f"font-family: {family}; font-size:12px; color:{C_TEXT};"
+            f"background:rgba(255,255,255,5); border:1px solid rgba(255,255,255,12);"
+            f"border-radius:8px; padding:8px 10px;"
+        )
+
+    # ── startup toggle ────────────────────────────────────────────────────────
+
+    def _on_startup_toggled(self, state: int) -> None:
+        """Immediately write/remove the registry key on toggle."""
+        if state == Qt.Checked:
+            register_startup()
+        else:
+            unregister_startup()
+
     # ── color pickers ─────────────────────────────────────────────────────────
 
     def _get_color(self, title: str, init_rgba: list) -> QColor:
         dlg = QColorDialog(QColor(init_rgba[0], init_rgba[1], init_rgba[2], init_rgba[3]), self)
         dlg.setWindowTitle(title)
         dlg.setOption(QColorDialog.ShowAlphaChannel)
-        # Apply a stylesheet specifically for this dialog so it matches the dark theme
         dlg.setStyleSheet("""
-            QColorDialog {
-                background: #1c1c2a;
-            }
-            QLabel {
-                color: #eeeef8;
-                background: transparent;
-            }
+            QColorDialog { background: #1c1c2a; }
+            QLabel { color: #eeeef8; background: transparent; }
             QPushButton {
-                background: #2b2b3b;
-                color: #eeeef8;
+                background: #2b2b3b; color: #eeeef8;
                 border: 1px solid rgba(255,255,255,40);
-                padding: 4px 12px;
-                border-radius: 4px;
+                padding: 4px 12px; border-radius: 4px;
             }
-            QPushButton:hover {
-                background: #3b3b4b;
-            }
-            QSpinBox {
-                background: rgba(255,255,255,10);
-                color: #eeeef8;
-                border: 1px solid rgba(255,255,255,30);
-            }
-            QLineEdit {
-                background: rgba(255,255,255,10);
-                color: #eeeef8;
-            }
+            QPushButton:hover { background: #3b3b4b; }
+            QSpinBox { background: rgba(255,255,255,10); color: #eeeef8; border: 1px solid rgba(255,255,255,30); }
+            QLineEdit { background: rgba(255,255,255,10); color: #eeeef8; }
         """)
         if dlg.exec_() == QDialog.Accepted:
             return dlg.currentColor()
@@ -2965,39 +3354,52 @@ class _HubCustomizeDialog(QDialog):
         # Sync alpha spinboxes
         self._header_rgba[3] = self._header_alpha.value()
         self._body_rgba[3]   = self._body_alpha.value()
-        hr = list(self._header_rgba)
-        br = list(self._body_rgba)
-        
-        # Save to persistence
+
+        # Save colors
         self._data_ref["hub_colors"] = {
-            "header": hr,
-            "body": br
+            "header": list(self._header_rgba),
+            "body":   list(self._body_rgba),
         }
+
+        # Save font
+        self._data_ref["hub_font"] = self._selected_font_name
         save_data(self._data_ref)
-        
-        # Trigger global update
+
+        # Trigger global color update on the Launcher
         parent = self.parent()
         if hasattr(parent, "_apply_saved_hub_colors"):
             parent._apply_saved_hub_colors()
-            
+
+        # Apply font app-wide immediately
+        _apply_global_font(self._selected_font_name)
+
         self.accept()
 
     def _reset_defaults(self) -> None:
+        # Reset colors
         self._header_rgba = [24, 24, 38, 248]
         self._body_rgba   = [14, 14, 22, 240]
         self._update_preview(self._header_preview, self._header_rgba, self._header_alpha)
         self._header_alpha.setValue(248)
         self._update_preview(self._body_preview, self._body_rgba, self._body_alpha)
         self._body_alpha.setValue(240)
-        
-        if "hub_colors" in self._data_ref:
-            del self._data_ref["hub_colors"]
+
+        # Reset font combo to default
+        self._font_combo.setCurrentIndex(0)
+        self._selected_font_name = _FONT_OPTIONS[0][0]
+        self._update_font_preview()
+
+        # Persist reset
+        self._data_ref.pop("hub_colors", None)
+        self._data_ref.pop("hub_font", None)
         save_data(self._data_ref)
-        
-        # Trigger global update
+
+        # Propagate
         parent = self.parent()
         if hasattr(parent, "_apply_saved_hub_colors"):
             parent._apply_saved_hub_colors()
+
+        _apply_global_font(_FONT_OPTIONS[0][0])
 
     # ── drag to move dialog ───────────────────────────────────────────────────
 
@@ -3019,6 +3421,407 @@ class _HubCustomizeDialog(QDialog):
 #  Launcher
 # ─────────────────────────────────────────────────────────────────────────────
 
+
+import calendar
+import requests
+import threading
+
+# ─────────────────────────────────────────────────────────────────────────────
+#  Calendar Widget
+# ─────────────────────────────────────────────────────────────────────────────
+class CalendarWidget(FloatingWidget):
+    WIDGET_TYPE = "calendar"
+
+    def __init__(self, widget_id: str, data_ref: dict, x: int = 200, y: int = 200):
+        self._data_file = get_data_dir() / "calendar_events.json"
+        self._events = self._load_events()
+        
+        self.current_date = datetime.now().date()
+        self.display_year = self.current_date.year
+        self.display_month = self.current_date.month
+        
+        self._day_labels = []
+
+        super().__init__("📅  Calendar", widget_id, data_ref, x, y)
+        self.setFixedWidth(380)
+
+    def _load_events(self) -> dict:
+        try:
+            if self._data_file.exists():
+                with open(self._data_file, "r", encoding="utf-8") as f:
+                    return json.load(f)
+        except Exception:
+            pass
+        return {}
+
+    def _save_events(self) -> None:
+        try:
+            with open(self._data_file, "w", encoding="utf-8") as f:
+                json.dump(self._events, f, indent=2)
+        except Exception as e:
+            print(f"[Calendar] Save failed: {e}")
+
+    def _build_ui(self) -> None:
+        super()._build_ui()
+        self._content_layout.setContentsMargins(12, 12, 12, 12)
+        self._content_layout.setSpacing(10)
+
+        # Header
+        h_row = QHBoxLayout()
+        self._prev_btn = QPushButton("◀")
+        self._prev_btn.setFixedSize(30, 30)
+        self._prev_btn.setStyleSheet(f"background:rgba(255,255,255,10); border:none; border-radius:15px; color:{C_TEXT};")
+        self._prev_btn.clicked.connect(self._prev_month)
+        
+        self._month_lbl = QLabel()
+        self._month_lbl.setAlignment(Qt.AlignCenter)
+        self._month_lbl.setStyleSheet(f"font-size:16px; font-weight:bold; color:{C_TEXT};")
+        
+        self._next_btn = QPushButton("▶")
+        self._next_btn.setFixedSize(30, 30)
+        self._next_btn.setStyleSheet(f"background:rgba(255,255,255,10); border:none; border-radius:15px; color:{C_TEXT};")
+        self._next_btn.clicked.connect(self._next_month)
+        
+        h_row.addWidget(self._prev_btn)
+        h_row.addWidget(self._month_lbl, 1)
+        h_row.addWidget(self._next_btn)
+        self._content_layout.addLayout(h_row)
+
+        # Days of week header
+        days = ["Mon", "Tue", "Wed", "Thu", "Fri", "Sat", "Sun"]
+        d_row = QHBoxLayout()
+        d_row.setSpacing(4)
+        for d in days:
+            lbl = QLabel(d)
+            lbl.setAlignment(Qt.AlignCenter)
+            lbl.setStyleSheet(f"font-size:11px; font-weight:bold; color:{C_TEXT_DIM};")
+            d_row.addWidget(lbl)
+        self._content_layout.addLayout(d_row)
+
+        # Grid for days
+        self._grid = QGridLayout()
+        self._grid.setSpacing(4)
+        self._content_layout.addLayout(self._grid)
+        
+        self._update_calendar()
+
+    def _prev_month(self):
+        if self.display_month == 1:
+            self.display_month = 12
+            self.display_year -= 1
+        else:
+            self.display_month -= 1
+        self._update_calendar()
+
+    def _next_month(self):
+        if self.display_month == 12:
+            self.display_month = 1
+            self.display_year += 1
+        else:
+            self.display_month += 1
+        self._update_calendar()
+
+    def _update_calendar(self):
+        # Clear grid
+        while self._grid.count():
+            item = self._grid.takeAt(0)
+            if item.widget():
+                item.widget().deleteLater()
+                
+        month_name = calendar.month_name[self.display_month]
+        self._month_lbl.setText(f"{month_name} {self.display_year}")
+
+        cal = calendar.monthcalendar(self.display_year, self.display_month)
+        
+        for row, week in enumerate(cal):
+            for col, day in enumerate(week):
+                if day == 0:
+                    continue
+                    
+                date_str = f"{self.display_year}-{self.display_month:02d}-{day:02d}"
+                is_today = (self.display_year == self.current_date.year and 
+                            self.display_month == self.current_date.month and 
+                            day == self.current_date.day)
+                            
+                btn = QPushButton(str(day))
+                btn.setFixedSize(40, 40)
+                
+                has_event = date_str in self._events and self._events[date_str].strip()
+                
+                # Styles
+                bg = f"rgba({C_ACCENT}, 200)" if is_today else "rgba(255,255,255,10)"
+                fg = "white" if is_today else C_TEXT
+                border = f"1px solid {C_ACCENT}" if has_event else "none"
+                font_weight = "bold" if is_today else "normal"
+                
+                btn.setStyleSheet(f"QPushButton{{background:{bg}; border:{border}; border-radius:20px; color:{fg}; font-weight:{font_weight}; font-size:13px;}}"
+                                  f"QPushButton:hover{{background:rgba(255,255,255,30);}}")
+                
+                btn.clicked.connect(lambda checked, d=date_str: self._on_day_click(d))
+                self._grid.addWidget(btn, row, col)
+
+    def _on_day_click(self, date_str: str):
+        existing = self._events.get(date_str, "")
+        
+        dlg = QDialog(self)
+        dlg.setWindowFlags(Qt.FramelessWindowHint | Qt.Dialog)
+        dlg.setAttribute(Qt.WA_TranslucentBackground, True)
+        dlg.setFixedSize(300, 300)
+        
+        lay = QVBoxLayout(dlg)
+        lay.setContentsMargins(0,0,0,0)
+        
+        card = QFrame()
+        card.setStyleSheet(f"QFrame{{background:{C_BG}; border:1px solid rgba(255,255,255,30); border-radius:10px;}}")
+        c_lay = QVBoxLayout(card)
+        c_lay.setContentsMargins(15, 15, 15, 15)
+        
+        title = QLabel(f"Events for {date_str}")
+        title.setStyleSheet(f"font-size:14px; font-weight:bold; color:{C_TEXT}; border:none;")
+        c_lay.addWidget(title)
+        
+        text_edit = QTextEdit()
+        text_edit.setPlainText(existing)
+        text_edit.setStyleSheet(f"background:rgba(255,255,255,10); color:{C_TEXT}; border:1px solid rgba(255,255,255,20); border-radius:6px; padding:6px;")
+        c_lay.addWidget(text_edit)
+        
+        btn_row = QHBoxLayout()
+        save_btn = QPushButton("Save")
+        save_btn.setStyleSheet(f"background:rgba({C_ACCENT}, 180); font-weight:bold; padding:6px; border-radius:6px;")
+        save_btn.clicked.connect(dlg.accept)
+        
+        del_btn = QPushButton("Delete")
+        del_btn.setStyleSheet(f"background:rgba(235,75,75,180); font-weight:bold; padding:6px; border-radius:6px;")
+        del_btn.clicked.connect(dlg.reject)
+        
+        cancel_btn = QPushButton("Cancel")
+        cancel_btn.setStyleSheet(f"background:rgba(255,255,255,20); padding:6px; border-radius:6px;")
+        cancel_btn.clicked.connect(lambda: dlg.done(2))
+        
+        btn_row.addWidget(del_btn)
+        btn_row.addStretch()
+        btn_row.addWidget(cancel_btn)
+        btn_row.addWidget(save_btn)
+        c_lay.addLayout(btn_row)
+        
+        lay.addWidget(card)
+        
+        res = dlg.exec_()
+        if res == QDialog.Accepted:
+            val = text_edit.toPlainText().strip()
+            if val:
+                self._events[date_str] = val
+            elif date_str in self._events:
+                del self._events[date_str]
+            self._save_events()
+            self._update_calendar()
+        elif res == QDialog.Rejected:
+            if date_str in self._events:
+                del self._events[date_str]
+                self._save_events()
+                self._update_calendar()
+
+# ─────────────────────────────────────────────────────────────────────────────
+#  Prayer Times Widget
+# ─────────────────────────────────────────────────────────────────────────────
+class PrayerTimesWidget(FloatingWidget):
+    WIDGET_TYPE = "prayer"
+
+    def __init__(self, widget_id: str, data_ref: dict, x: int = 200, y: int = 200):
+        self._data_file = get_data_dir() / "prayer_settings.json"
+        self._settings = self._load_settings()
+        
+        self.prayer_times = {}
+        self.current_prayer = None
+        self.next_prayer = None
+        self.last_fetch_date = None
+        
+        self.prayer_names = ["Fajr", "Dhuhr", "Asr", "Maghrib", "Isha"]
+        self._prayer_cards = {}
+        
+        super().__init__("🕌  Prayer Times", widget_id, data_ref, x, y)
+        self.setFixedWidth(340)
+        
+        if self._settings.get("city"):
+            self._fetch_times()
+            
+        self._update_timer = QTimer(self)
+        self._update_timer.timeout.connect(self._update_countdown)
+        self._update_timer.start(1000)
+
+    def _load_settings(self) -> dict:
+        try:
+            if self._data_file.exists():
+                with open(self._data_file, "r", encoding="utf-8") as f:
+                    return json.load(f)
+        except Exception:
+            pass
+        return {"city": "London, UK"}
+
+    def _save_settings(self) -> None:
+        try:
+            with open(self._data_file, "w", encoding="utf-8") as f:
+                json.dump(self._settings, f, indent=2)
+        except Exception as e:
+            print(f"[Prayer] Save failed: {e}")
+
+    def _build_ui(self) -> None:
+        super()._build_ui()
+        self._content_layout.setContentsMargins(12, 12, 12, 12)
+        self._content_layout.setSpacing(10)
+        
+        h_row = QHBoxLayout()
+        self._city_lbl = QLabel(self._settings.get("city", "City not set"))
+        self._city_lbl.setStyleSheet(f"font-size:14px; font-weight:bold; color:{C_TEXT};")
+        
+        settings_btn = QPushButton("⚙")
+        settings_btn.setFixedSize(28, 28)
+        settings_btn.setStyleSheet("background:transparent; border:none; font-size:14px;")
+        settings_btn.clicked.connect(self._open_settings)
+        
+        refresh_btn = QPushButton("⟳")
+        refresh_btn.setFixedSize(28, 28)
+        refresh_btn.setStyleSheet("background:transparent; border:none; font-size:16px;")
+        refresh_btn.clicked.connect(self._fetch_times)
+        
+        h_row.addWidget(self._city_lbl, 1)
+        h_row.addWidget(settings_btn)
+        h_row.addWidget(refresh_btn)
+        self._content_layout.addLayout(h_row)
+        
+        self._countdown_lbl = QLabel("Fetching times...")
+        self._countdown_lbl.setAlignment(Qt.AlignCenter)
+        self._countdown_lbl.setStyleSheet(f"font-size:12px; font-style:italic; color:{C_ACCENT2};")
+        self._content_layout.addWidget(self._countdown_lbl)
+        
+        for prayer in self.prayer_names:
+            card = QFrame()
+            card.setStyleSheet("QFrame{background:rgba(255,255,255,8); border-radius:8px;}")
+            c_lay = QHBoxLayout(card)
+            c_lay.setContentsMargins(16, 12, 16, 12)
+            
+            n_lbl = QLabel(prayer)
+            n_lbl.setStyleSheet("font-size:14px; background:transparent; border:none;")
+            
+            t_lbl = QLabel("--:--")
+            t_lbl.setStyleSheet("font-size:14px; font-weight:bold; background:transparent; border:none;")
+            
+            c_lay.addWidget(n_lbl)
+            c_lay.addStretch()
+            c_lay.addWidget(t_lbl)
+            
+            self._content_layout.addWidget(card)
+            self._prayer_cards[prayer] = {"card": card, "name": n_lbl, "time": t_lbl}
+            
+    def _open_settings(self):
+        dlg = EditTaskDialog("Location Settings", "Enter City (e.g., 'London, UK')", self)
+        # Hack to convert EditTaskDialog into input
+        input_field = QLineEdit(self._settings.get("city", ""))
+        input_field.setStyleSheet(f"background:rgba(255,255,255,10); color:{C_TEXT}; padding:8px; border-radius:4px;")
+        # find content layout and add widget
+        content_vbox = dlg.findChild(QVBoxLayout)
+        content_vbox.insertWidget(2, input_field)
+        
+        if dlg.exec_():
+            new_city = input_field.text().strip()
+            if new_city:
+                self._settings["city"] = new_city
+                self._city_lbl.setText(new_city)
+                self._save_settings()
+                self._fetch_times()
+
+    def _fetch_times(self):
+        city = self._settings.get("city")
+        if not city:
+            return
+        self._countdown_lbl.setText("Fetching prayer times...")
+        
+        def run_fetch():
+            url = f"http://api.aladhan.com/v1/timingsByAddress?address={city}"
+            try:
+                resp = requests.get(url, timeout=10)
+                resp.raise_for_status()
+                data = resp.json()
+                if data.get("code") == 200:
+                    t = data["data"]["timings"]
+                    res = {p: t.get(p) for p in self.prayer_names}
+                    QTimer.singleShot(0, lambda: self._on_fetch_success(res))
+                else:
+                    QTimer.singleShot(0, lambda: self._countdown_lbl.setText("Error: Could not find location"))
+            except Exception as e:
+                QTimer.singleShot(0, lambda: self._countdown_lbl.setText(f"Network Error: {str(e)[:20]}"))
+                
+        threading.Thread(target=run_fetch, daemon=True).start()
+
+    def _on_fetch_success(self, res: dict):
+        self.prayer_times = res
+        self.last_fetch_date = datetime.now().date()
+        for p, t in self.prayer_times.items():
+            if t:
+                self._prayer_cards[p]["time"].setText(t)
+        self._calc_next()
+
+    def _calc_next(self):
+        if not self.prayer_times:
+            return
+            
+        now = datetime.now()
+        
+        self.next_prayer = None
+        self.current_prayer = None
+        
+        pts = []
+        for p in self.prayer_names:
+            t_str = self.prayer_times.get(p)
+            if t_str:
+                h, m = map(int, t_str.split(':'))
+                dt = now.replace(hour=h, minute=m, second=0, microsecond=0)
+                pts.append((p, dt))
+                
+        pts.sort(key=lambda x: x[1])
+        
+        for i, (p, dt) in enumerate(pts):
+            if dt > now:
+                self.next_prayer = (p, dt)
+                if i > 0:
+                    self.current_prayer = pts[i-1][0]
+                else:
+                    self.current_prayer = "Isha"
+                break
+                
+        if not self.next_prayer and pts:
+            tomorrow_fajr = pts[0][1] + timedelta(days=1)
+            self.next_prayer = (pts[0][0], tomorrow_fajr)
+            self.current_prayer = "Isha"
+            
+        for p in self.prayer_names:
+            c = self._prayer_cards[p]
+            if p == self.current_prayer:
+                c["card"].setStyleSheet(f"QFrame{{background:rgba({C_ACCENT}, 150); border-radius:8px;}}")
+                c["name"].setStyleSheet(f"font-size:14px; font-weight:bold; color:white; background:transparent; border:none;")
+                c["time"].setStyleSheet(f"font-size:14px; font-weight:bold; color:white; background:transparent; border:none;")
+            else:
+                c["card"].setStyleSheet("QFrame{background:rgba(255,255,255,8); border-radius:8px;}")
+                c["name"].setStyleSheet(f"font-size:14px; color:{C_TEXT}; background:transparent; border:none;")
+                c["time"].setStyleSheet(f"font-size:14px; font-weight:bold; color:{C_TEXT}; background:transparent; border:none;")
+
+    def _update_countdown(self):
+        if self.last_fetch_date and self.last_fetch_date != datetime.now().date():
+            self._fetch_times()
+            
+        if self.next_prayer:
+            now = datetime.now()
+            nxt_name, nxt_dt = self.next_prayer
+            
+            diff = (nxt_dt - now).total_seconds()
+            if diff <= 0:
+                self._calc_next()
+            else:
+                h, rem = divmod(int(diff), 3600)
+                m, s = divmod(rem, 60)
+                t_str = f"{h}h {m}m {s}s" if h > 0 else f"{m}m {s}s"
+                self._countdown_lbl.setText(f"Next: {nxt_name} in {t_str}")
+
 class Launcher(QWidget):
     def __init__(self, data_ref: dict):
         super().__init__(None, Qt.FramelessWindowHint | Qt.Window)
@@ -3039,6 +3842,8 @@ class Launcher(QWidget):
         self._keystroke_widget: KeystrokeWidget          | None = None
         self._topography_widget:TopographyWidget         | None = None
         self._notes_widget:     SmartNotesFloatingWidget | None = None
+        self._calendar_widget:  CalendarWidget           | None = None
+        self._prayer_widget:    PrayerTimesWidget        | None = None
 
         self._build_ui()
         self._build_tray()
@@ -3091,6 +3896,11 @@ class Launcher(QWidget):
             "📋  Clipboard History", self._spawn_clipboard, "#a78bfa")
         self._btn_notes = self._make_launch_btn(
             "📒  Smart Notes",       self._spawn_notes,     "#9d8df5")
+        self._btn_calendar = self._make_launch_btn(
+            "📅  Calendar",           self._spawn_calendar,   "#3b82f6")
+        self._btn_prayer = self._make_launch_btn(
+            "🕌  Prayer Times",       self._spawn_prayer,     "#10b981")
+
 
         # Keep hidden button attrs for close-map compatibility
         self._btn_pomodoro   = None
@@ -3103,6 +3913,9 @@ class Launcher(QWidget):
         cv.addWidget(self._btn_todo)
         cv.addWidget(self._btn_clipboard)
         cv.addWidget(self._btn_notes)
+        cv.addWidget(self._btn_calendar)
+        # Prayer Times widget is temporarily disabled (needs more work)
+        # cv.addWidget(self._btn_prayer)
 
         # separator
         sep = QFrame()
@@ -3111,7 +3924,7 @@ class Launcher(QWidget):
         cv.addWidget(sep)
 
         # Customize button
-        self._btn_customize = QPushButton("🎨  Customize Hub")
+        self._btn_customize = QPushButton("⚙️  General Settings")
         self._btn_customize.setObjectName("LaunchBtn")
         self._btn_customize.setStyleSheet(
             "#LaunchBtn { text-align: left; }"
@@ -3276,6 +4089,17 @@ class Launcher(QWidget):
             btn.setToolTip(f"{label} is already open")
         self._register(w, type_key, x, y)
 
+
+    def _spawn_calendar(self)      -> None:
+        self._spawn_singleton(
+            "_calendar_widget", CalendarWidget,
+            "_btn_calendar", "Calendar", "calendar")
+
+    def _spawn_prayer(self)        -> None:
+        self._spawn_singleton(
+            "_prayer_widget", PrayerTimesWidget,
+            "_btn_prayer", "Prayer Times", "prayer")
+
     def _spawn_clipboard(self)  -> None:
         self._spawn_singleton(
             "_clipboard_widget", ClipboardWidget,
@@ -3309,8 +4133,8 @@ class Launcher(QWidget):
     # ── hub customization ─────────────────────────────────────────────────────
 
     def _open_customize(self) -> None:
-        """Open the hub colour-customizer dialog."""
-        dlg = _HubCustomizeDialog(self._card, self._data_ref, self)
+        """Open the General Settings dialog."""
+        dlg = _GeneralSettingsDialog(self._card, self._data_ref, self)
         dlg.exec_()
 
     def _apply_saved_hub_colors(self) -> None:
@@ -3352,6 +4176,8 @@ class Launcher(QWidget):
             (KeystrokeWidget,            "_keystroke_widget",  "_btn_keystroke"),
             (TopographyWidget,           "_topography_widget", "_btn_topography"),
             (SmartNotesFloatingWidget,   "_notes_widget",      "_btn_notes"),
+            (CalendarWidget,             "_calendar_widget",   "_btn_calendar"),
+            (PrayerTimesWidget,          "_prayer_widget",     "_btn_prayer"),
         ]
         for cls, attr, btn_attr in _close_map:
             if isinstance(w, cls):
@@ -3495,6 +4321,23 @@ def register_startup() -> None:
         print(f"[WARN] Could not register startup entry: {e}")
 
 
+def unregister_startup() -> None:
+    """Remove Widjett from the HKCU Run key (disable auto-launch on login)."""
+    if not getattr(sys, 'frozen', False):
+        return  # dev mode — do nothing
+    try:
+        with winreg.OpenKey(
+            winreg.HKEY_CURRENT_USER, _STARTUP_KEY,
+            0, winreg.KEY_SET_VALUE
+        ) as key:
+            winreg.DeleteValue(key, _STARTUP_NAME)
+        print("[INFO] Widjett removed from startup.")
+    except FileNotFoundError:
+        pass  # wasn't registered — fine
+    except Exception as e:
+        print(f"[WARN] Could not remove startup entry: {e}")
+
+
 # ─────────────────────────────────────────────────────────────────────────────
 #  Entry point
 # ─────────────────────────────────────────────────────────────────────────────
@@ -3522,6 +4365,12 @@ def main() -> None:
     app.setWindowIcon(app_icon)
 
     data     = load_data()
+    
+    # Load and apply custom font if set
+    saved_font = data.get("hub_font")
+    if saved_font:
+        _apply_global_font(saved_font)
+        
     launcher = Launcher(data)
     FloatingWidget.show_hub = lambda: (launcher.show(), launcher.raise_(), launcher.activateWindow())
     launcher.show()
