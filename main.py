@@ -60,6 +60,15 @@ except ImportError as _sn_err:
     _HAS_SMARTNOTES = False
     print(f"[WARN] SmartNotes not loaded: {_sn_err}")
 
+try:
+    import requests as _requests
+    _HAS_REQUESTS = True
+except ImportError:
+    _requests = None
+    _HAS_REQUESTS = False
+    print("[WARN] requests not installed — Prayer Times widget will not work. Run: pip install requests")
+
+
 # ── High-DPI flags MUST be set BEFORE QApplication is created ────────────────
 from PyQt5.QtCore import Qt
 from PyQt5.QtWidgets import QApplication
@@ -555,7 +564,31 @@ class FloatingWidget(QWidget):
                 self._drag_pos = event.globalPos() - self.frameGeometry().topLeft()
                 return True
             elif event.type() == QEvent.MouseMove and self._dragging:
-                self.move(event.globalPos() - self._drag_pos)
+                new_pos = event.globalPos() - self._drag_pos
+                
+                # Screen snapping logic
+                screen = QApplication.screenAt(event.globalPos())
+                if not screen:
+                    screen = QApplication.primaryScreen()
+                
+                if screen:
+                    geom = screen.availableGeometry()
+                    snap_dist = 25  # Snap threshold in pixels
+                    
+                    # Snap horizontal
+                    if abs(new_pos.x() - geom.left()) < snap_dist:
+                        new_pos.setX(geom.left())
+                    elif abs(new_pos.x() + self.width() - geom.right()) < snap_dist:
+                        # +1 to account for right edge coordinate inclusive vs exclusive
+                        new_pos.setX(geom.right() - self.width() + 1)
+                        
+                    # Snap vertical
+                    if abs(new_pos.y() - geom.top()) < snap_dist:
+                        new_pos.setY(geom.top())
+                    elif abs(new_pos.y() + self.height() - geom.bottom()) < snap_dist:
+                        new_pos.setY(geom.bottom() - self.height() + 1)
+                        
+                self.move(new_pos)
                 return True
             elif event.type() == QEvent.MouseButtonRelease and event.button() == Qt.LeftButton:
                 self._dragging = False
@@ -2851,9 +2884,9 @@ class SmartNotesFloatingWidget(FloatingWidget):
     def __init__(self, widget_id: str, data_ref: dict,
                  x: int = 200, y: int = 200):
         super().__init__("📒  Smart Notes", widget_id, data_ref, x, y)
-        self.setMinimumWidth(420)
+        self.setMinimumWidth(560)
         self.setMinimumHeight(500)
-        self.resize(520, 580)
+        self.resize(560, 580)
         self._build_notes_ui()
 
     def _build_notes_ui(self) -> None:
@@ -3468,22 +3501,23 @@ class CalendarWidget(FloatingWidget):
 
         # Header
         h_row = QHBoxLayout()
-        self._prev_btn = QPushButton("◀")
+        self._prev_btn = QPushButton("<")
         self._prev_btn.setFixedSize(30, 30)
-        self._prev_btn.setStyleSheet(f"background:rgba(255,255,255,10); border:none; border-radius:15px; color:{C_TEXT};")
+        self._prev_btn.setStyleSheet(f"background:rgba(255,255,255,10); border:none; border-radius:15px; color:{C_TEXT}; font-weight:bold; font-size:16px; padding:0; margin:0;")
         self._prev_btn.clicked.connect(self._prev_month)
         
-        self._month_lbl = QLabel()
-        self._month_lbl.setAlignment(Qt.AlignCenter)
-        self._month_lbl.setStyleSheet(f"font-size:16px; font-weight:bold; color:{C_TEXT};")
+        self._month_btn = QPushButton()
+        self._month_btn.setCursor(Qt.PointingHandCursor)
+        self._month_btn.setStyleSheet(f"background:transparent; border:none; font-size:16px; font-weight:bold; color:{C_TEXT}; padding:0; margin:0;")
+        self._month_btn.clicked.connect(self._select_month_year)
         
-        self._next_btn = QPushButton("▶")
+        self._next_btn = QPushButton(">")
         self._next_btn.setFixedSize(30, 30)
-        self._next_btn.setStyleSheet(f"background:rgba(255,255,255,10); border:none; border-radius:15px; color:{C_TEXT};")
+        self._next_btn.setStyleSheet(f"background:rgba(255,255,255,10); border:none; border-radius:15px; color:{C_TEXT}; font-weight:bold; font-size:16px; padding:0; margin:0;")
         self._next_btn.clicked.connect(self._next_month)
         
         h_row.addWidget(self._prev_btn)
-        h_row.addWidget(self._month_lbl, 1)
+        h_row.addWidget(self._month_btn, 1)
         h_row.addWidget(self._next_btn)
         self._content_layout.addLayout(h_row)
 
@@ -3529,7 +3563,7 @@ class CalendarWidget(FloatingWidget):
                 item.widget().deleteLater()
                 
         month_name = calendar.month_name[self.display_month]
-        self._month_lbl.setText(f"{month_name} {self.display_year}")
+        self._month_btn.setText(f"{month_name} {self.display_year}")
 
         cal = calendar.monthcalendar(self.display_year, self.display_month)
         
@@ -3551,14 +3585,81 @@ class CalendarWidget(FloatingWidget):
                 # Styles
                 bg = f"rgba({C_ACCENT}, 200)" if is_today else "rgba(255,255,255,10)"
                 fg = "white" if is_today else C_TEXT
-                border = f"1px solid {C_ACCENT}" if has_event else "none"
+                border = f"1px solid {C_ACCENT}" if has_event else "1px solid transparent"
                 font_weight = "bold" if is_today else "normal"
                 
-                btn.setStyleSheet(f"QPushButton{{background:{bg}; border:{border}; border-radius:20px; color:{fg}; font-weight:{font_weight}; font-size:13px;}}"
-                                  f"QPushButton:hover{{background:rgba(255,255,255,30);}}")
+                btn.setStyleSheet(
+                    f"QPushButton{{"
+                    f"background:{bg}; "
+                    f"border:{border}; "
+                    f"border-radius:20px; "
+                    f"color:{fg}; "
+                    f"font-weight:{font_weight}; "
+                    f"font-size:14px; "
+                    f"padding:0px; "
+                    f"margin:0px; "
+                    f"outline:none;"
+                    f"}}"
+                    f"QPushButton:hover{{background:rgba(255,255,255,30);}}"
+                )
                 
                 btn.clicked.connect(lambda checked, d=date_str: self._on_day_click(d))
                 self._grid.addWidget(btn, row, col)
+
+    def _select_month_year(self):
+        dlg = QDialog(self)
+        dlg.setWindowFlags(Qt.FramelessWindowHint | Qt.Dialog | Qt.WindowStaysOnTopHint)
+        dlg.setAttribute(Qt.WA_TranslucentBackground, True)
+        dlg.setFixedSize(260, 200)
+        
+        lay = QVBoxLayout(dlg)
+        lay.setContentsMargins(0,0,0,0)
+        
+        card = QFrame()
+        card.setStyleSheet(f"QFrame{{background:{C_BG}; border:1px solid rgba(255,255,255,30); border-radius:10px;}}")
+        c_lay = QVBoxLayout(card)
+        c_lay.setContentsMargins(15, 15, 15, 15)
+        
+        title = QLabel("Jump to Date")
+        title.setStyleSheet(f"font-size:14px; font-weight:bold; color:{C_TEXT}; border:none;")
+        c_lay.addWidget(title)
+        
+        h_lay = QHBoxLayout()
+        month_cb = QComboBox()
+        month_cb.addItems(list(calendar.month_name)[1:])
+        month_cb.setCurrentIndex(self.display_month - 1)
+        month_cb.setStyleSheet(f"background:rgba(255,255,255,10); color:{C_TEXT}; border:1px solid rgba(255,255,255,20); border-radius:4px; padding:4px;")
+        
+        year_sb = QSpinBox()
+        year_sb.setRange(1900, 2100)
+        year_sb.setValue(self.display_year)
+        year_sb.setStyleSheet(f"background:rgba(255,255,255,10); color:{C_TEXT}; border:1px solid rgba(255,255,255,20); border-radius:4px; padding:4px;")
+        
+        h_lay.addWidget(month_cb, 1)
+        h_lay.addWidget(year_sb, 1)
+        c_lay.addLayout(h_lay)
+        
+        btn_row = QHBoxLayout()
+        ok_btn = QPushButton("Go")
+        ok_btn.setStyleSheet(f"background:rgba({C_ACCENT}, 180); font-weight:bold; padding:6px; border-radius:6px; color:white;")
+        ok_btn.clicked.connect(dlg.accept)
+        
+        cancel_btn = QPushButton("Cancel")
+        cancel_btn.setStyleSheet(f"background:rgba(255,255,255,20); padding:6px; border-radius:6px; color:{C_TEXT};")
+        cancel_btn.clicked.connect(dlg.reject)
+        
+        btn_row.addStretch()
+        btn_row.addWidget(cancel_btn)
+        btn_row.addWidget(ok_btn)
+        c_lay.addLayout(btn_row)
+        
+        lay.addWidget(card)
+        
+        if dlg.exec_() == QDialog.Accepted:
+            self.display_month = month_cb.currentIndex() + 1
+            self.display_year = year_sb.value()
+            self._update_calendar()
+
 
     def _on_day_click(self, date_str: str):
         existing = self._events.get(date_str, "")
@@ -3621,6 +3722,52 @@ class CalendarWidget(FloatingWidget):
                 self._save_events()
                 self._update_calendar()
 
+class LocationDialog(QDialog):
+    def __init__(self, current_city: str, parent=None):
+        super().__init__(parent, Qt.FramelessWindowHint | Qt.Dialog | Qt.WindowStaysOnTopHint)
+        self.setAttribute(Qt.WA_TranslucentBackground, True)
+        self.city = current_city
+        self._build_ui()
+
+    def _build_ui(self):
+        lay = QVBoxLayout(self)
+        lay.setContentsMargins(0, 0, 0, 0)
+        
+        card = QFrame()
+        card.setObjectName("DialogCard")
+        c_lay = QVBoxLayout(card)
+        c_lay.setContentsMargins(20, 20, 20, 20)
+        c_lay.setSpacing(12)
+        
+        lbl = QLabel("Location Settings")
+        lbl.setStyleSheet(f"font-size:16px; font-weight:bold; color:{C_TEXT};")
+        c_lay.addWidget(lbl)
+        
+        sub = QLabel("Enter City (e.g., 'London, UK' or 'New York, USA')")
+        sub.setStyleSheet(f"font-size:12px; color:{C_TEXT_DIM};")
+        c_lay.addWidget(sub)
+        
+        self.input_field = QLineEdit(self.city)
+        self.input_field.setPlaceholderText("City, Country")
+        self.input_field.setStyleSheet(f"background:rgba(255,255,255,10); color:{C_TEXT}; padding:8px; border-radius:4px;")
+        c_lay.addWidget(self.input_field)
+        
+        btn_row = QHBoxLayout()
+        btn_row.addStretch()
+        
+        cancel_btn = QPushButton("Cancel")
+        cancel_btn.clicked.connect(self.reject)
+        
+        save_btn = QPushButton("Save")
+        save_btn.setStyleSheet(f"background:{C_ACCENT}; color:white;")
+        save_btn.clicked.connect(self.accept)
+        
+        btn_row.addWidget(cancel_btn)
+        btn_row.addWidget(save_btn)
+        c_lay.addLayout(btn_row)
+        
+        lay.addWidget(card)
+
 # ─────────────────────────────────────────────────────────────────────────────
 #  Prayer Times Widget
 # ─────────────────────────────────────────────────────────────────────────────
@@ -3642,11 +3789,14 @@ class PrayerTimesWidget(FloatingWidget):
         super().__init__("🕌  Prayer Times", widget_id, data_ref, x, y)
         self.setFixedWidth(340)
         
+        # Thread-safe queue for results from background fetch thread
+        self._fetch_queue: queue.Queue = queue.Queue()
+        
         if self._settings.get("city"):
             self._fetch_times()
             
         self._update_timer = QTimer(self)
-        self._update_timer.timeout.connect(self._update_countdown)
+        self._update_timer.timeout.connect(self._tick)
         self._update_timer.start(1000)
 
     def _load_settings(self) -> dict:
@@ -3676,12 +3826,22 @@ class PrayerTimesWidget(FloatingWidget):
         
         settings_btn = QPushButton("⚙")
         settings_btn.setFixedSize(28, 28)
-        settings_btn.setStyleSheet("background:transparent; border:none; font-size:14px;")
+        settings_btn.setToolTip("Location Settings")
+        settings_btn.setStyleSheet(
+            f"QPushButton {{ background: rgba(255,255,255,12); border: 1px solid rgba(255,255,255,20);"
+            f" border-radius: 7px; font-size: 14px; color: {C_TEXT}; padding: 0; }}"
+            f"QPushButton:hover {{ background: rgba(157,141,245,160); border-color: {C_ACCENT}; }}"
+        )
         settings_btn.clicked.connect(self._open_settings)
         
         refresh_btn = QPushButton("⟳")
         refresh_btn.setFixedSize(28, 28)
-        refresh_btn.setStyleSheet("background:transparent; border:none; font-size:16px;")
+        refresh_btn.setToolTip("Refresh prayer times")
+        refresh_btn.setStyleSheet(
+            f"QPushButton {{ background: rgba(255,255,255,12); border: 1px solid rgba(255,255,255,20);"
+            f" border-radius: 7px; font-size: 16px; color: {C_TEXT}; padding: 0; }}"
+            f"QPushButton:hover {{ background: rgba(93,214,181,160); border-color: {C_ACCENT2}; }}"
+        )
         refresh_btn.clicked.connect(self._fetch_times)
         
         h_row.addWidget(self._city_lbl, 1)
@@ -3714,16 +3874,10 @@ class PrayerTimesWidget(FloatingWidget):
             self._prayer_cards[prayer] = {"card": card, "name": n_lbl, "time": t_lbl}
             
     def _open_settings(self):
-        dlg = EditTaskDialog("Location Settings", "Enter City (e.g., 'London, UK')", self)
-        # Hack to convert EditTaskDialog into input
-        input_field = QLineEdit(self._settings.get("city", ""))
-        input_field.setStyleSheet(f"background:rgba(255,255,255,10); color:{C_TEXT}; padding:8px; border-radius:4px;")
-        # find content layout and add widget
-        content_vbox = dlg.findChild(QVBoxLayout)
-        content_vbox.insertWidget(2, input_field)
+        dlg = LocationDialog(self._settings.get("city", ""), self)
         
         if dlg.exec_():
-            new_city = input_field.text().strip()
+            new_city = dlg.input_field.text().strip()
             if new_city:
                 self._settings["city"] = new_city
                 self._city_lbl.setText(new_city)
@@ -3734,24 +3888,49 @@ class PrayerTimesWidget(FloatingWidget):
         city = self._settings.get("city")
         if not city:
             return
+        if not _HAS_REQUESTS:
+            self._countdown_lbl.setText("\u274c 'requests' not installed")
+            return
         self._countdown_lbl.setText("Fetching prayer times...")
-        
+
         def run_fetch():
-            url = f"http://api.aladhan.com/v1/timingsByAddress?address={city}"
+            import urllib.parse
+            encoded_city = urllib.parse.quote(city)
+            url = f"http://api.aladhan.com/v1/timingsByAddress?address={encoded_city}"
             try:
-                resp = requests.get(url, timeout=10)
+                resp = _requests.get(url, timeout=10)
                 resp.raise_for_status()
                 data = resp.json()
                 if data.get("code") == 200:
                     t = data["data"]["timings"]
                     res = {p: t.get(p) for p in self.prayer_names}
-                    QTimer.singleShot(0, lambda: self._on_fetch_success(res))
+                    self._fetch_queue.put(("ok", res))
                 else:
-                    QTimer.singleShot(0, lambda: self._countdown_lbl.setText("Error: Could not find location"))
+                    msg = str(data.get("data", "Location not found"))[:40]
+                    self._fetch_queue.put(("err", f"\u274c {msg}"))
             except Exception as e:
-                QTimer.singleShot(0, lambda: self._countdown_lbl.setText(f"Network Error: {str(e)[:20]}"))
-                
+                err = str(e)
+                print(f"[Prayer] Fetch error: {err}")
+                self._fetch_queue.put(("err", f"\u274c Network error: {err[:30]}"))
+
         threading.Thread(target=run_fetch, daemon=True).start()
+
+    def _tick(self):
+        """Called every second — drains the fetch queue then updates the countdown."""
+        while not self._fetch_queue.empty():
+            try:
+                kind, payload = self._fetch_queue.get_nowait()
+                if kind == "ok":
+                    self._on_fetch_success(payload)
+                else:
+                    self._countdown_lbl.setText(payload)
+            except queue.Empty:
+                break
+        # Daily re-fetch
+        if self.last_fetch_date and self.last_fetch_date != datetime.now().date():
+            self._fetch_times()
+        self._update_countdown()
+
 
     def _on_fetch_success(self, res: dict):
         self.prayer_times = res
@@ -3806,13 +3985,10 @@ class PrayerTimesWidget(FloatingWidget):
                 c["time"].setStyleSheet(f"font-size:14px; font-weight:bold; color:{C_TEXT}; background:transparent; border:none;")
 
     def _update_countdown(self):
-        if self.last_fetch_date and self.last_fetch_date != datetime.now().date():
-            self._fetch_times()
-            
         if self.next_prayer:
             now = datetime.now()
             nxt_name, nxt_dt = self.next_prayer
-            
+
             diff = (nxt_dt - now).total_seconds()
             if diff <= 0:
                 self._calc_next()
@@ -3821,6 +3997,7 @@ class PrayerTimesWidget(FloatingWidget):
                 m, s = divmod(rem, 60)
                 t_str = f"{h}h {m}m {s}s" if h > 0 else f"{m}m {s}s"
                 self._countdown_lbl.setText(f"Next: {nxt_name} in {t_str}")
+
 
 class Launcher(QWidget):
     def __init__(self, data_ref: dict):
@@ -3914,8 +4091,7 @@ class Launcher(QWidget):
         cv.addWidget(self._btn_clipboard)
         cv.addWidget(self._btn_notes)
         cv.addWidget(self._btn_calendar)
-        # Prayer Times widget is temporarily disabled (needs more work)
-        # cv.addWidget(self._btn_prayer)
+        cv.addWidget(self._btn_prayer)
 
         # separator
         sep = QFrame()

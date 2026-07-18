@@ -737,8 +737,14 @@ class SmartNotesWidget(QWidget):
                 col = 0
                 row += 1
 
-        # push cards to top-left
+        # Add stretch to the row below the notes
         self._grid_layout.setRowStretch(row + 1, 1)
+        
+        # Reset column stretches first
+        for i in range(self._grid_layout.columnCount()):
+            self._grid_layout.setColumnStretch(i, 0)
+        # Add a stretch column at the end so cards pack to the left instead of spreading out
+        self._grid_layout.setColumnStretch(cols, 1)
 
         total = len(self._notes)
         shown = len(visible)

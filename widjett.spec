@@ -37,9 +37,19 @@ a = Analysis(
     hooksconfig={},
     runtime_hooks=[],
     excludes=[
-        'tkinter', 'unittest',
-        'xml', 'pydoc', 'doctest', 'difflib',
+        # GUI/Frameworks
+        'tkinter', 'unittest', 'pydoc', 'doctest', 'difflib',
         'distutils', 'setuptools', 'pkg_resources',
+        'IPython', 'notebook', 'jupyter', 'matplotlib', 'numpy', 'pandas', 'scipy', 'PIL',
+        
+        # Unused PyQt5 massive modules
+        'PyQt5.QtNetwork', 'PyQt5.QtQml', 'PyQt5.QtSql', 'PyQt5.QtWebEngine', 
+        'PyQt5.QtWebEngineCore', 'PyQt5.QtWebEngineWidgets', 'PyQt5.QtWebSockets', 
+        'PyQt5.QtBluetooth', 'PyQt5.QtMultimedia', 'PyQt5.QtMultimediaWidgets', 
+        'PyQt5.QtXml', 'PyQt5.QtTest', 'PyQt5.QtPrintSupport', 'PyQt5.QtDesigner', 
+        'PyQt5.QtLocation', 'PyQt5.QtPositioning', 'PyQt5.QtSensors', 'PyQt5.QtNfc', 
+        'PyQt5.QtTextToSpeech', 'PyQt5.QtDBus', 'PyQt5.QtOpenGL', 'PyQt5.QtQuick', 
+        'PyQt5.QtQuickWidgets', 'PyQt5.QtSvg', 'PyQt5.QtScript', 'PyQt5.QtScriptTools'
     ],
     noarchive=False,
     optimize=1,
